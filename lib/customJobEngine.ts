@@ -187,7 +187,7 @@ function executeJavaScript(meta: CustomJobMeta): Promise<{ output: string; error
  */
 function executePython(meta: CustomJobMeta): Promise<{ output: string; error?: string }> {
   const workerCode = `
-    importScripts('https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js');
+    importScripts('https://cdn.jsdelivr.net/pyodide/v0.23.4/full/pyodide.js');
     
     self.onmessage = async function(e) {
       const { code, projectFiles, mainEntrypoint, envParams, inputPayload, chunkIndex, totalChunks } = e.data;
@@ -255,6 +255,14 @@ if "" not in sys.path:
             batched: (str) => { prints.push(str); }
           });
           
+          self.postMessage({ type: 'status', message: 'Resolving and installing pip dependencies...' });
+          try {
+            await pyodide.loadPackagesFromImports(mainCode);
+          } catch(e) {
+            console.warn("Failed to auto-load some packages:", e);
+          }
+          
+          self.postMessage({ type: 'status', message: 'Executing...' });
           const pyResult = await pyodide.runPythonAsync(mainCode, { filename: mainEntrypoint });
           
           let outputStr = "";
@@ -279,6 +287,14 @@ if "" not in sys.path:
             batched: (str) => { prints.push(str); }
           });
 
+          self.postMessage({ type: 'status', message: 'Resolving and installing pip dependencies...' });
+          try {
+            await pyodide.loadPackagesFromImports(code);
+          } catch(e) {
+            console.warn("Failed to auto-load some packages:", e);
+          }
+
+          self.postMessage({ type: 'status', message: 'Executing...' });
           const pyResult = await pyodide.runPythonAsync(code);
           
           let outputStr = "";
