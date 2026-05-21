@@ -158,8 +158,15 @@ emit({
   const [customInput, setCustomInput] = useState('1000000');
   const [customTimeout, setCustomTimeout] = useState(30000);
   const [customResults, setCustomResults] = useState<Array<{ chunkIndex: number; peerId: string; output: string; error?: string; executionMs: number }>>([]);
+  const [customTotalChunks, setCustomTotalChunks] = useState(0);
   const [customWasmFile, setCustomWasmFile] = useState<File | null>(null);
   const [customWasmEntryFn, setCustomWasmEntryFn] = useState('run');
+
+  // Multi-file / Folder project states for Custom Jobs
+  const [customProjectFiles, setCustomProjectFiles] = useState<Record<string, string>>({});
+  const [customMainEntrypoint, setCustomMainEntrypoint] = useState<string>('');
+  const [customEnvParams, setCustomEnvParams] = useState<Record<string, string>>({});
+  const [customIsFolderMode, setCustomIsFolderMode] = useState<boolean>(false);
 
   // --- REFS ---
   const rtcRef = useRef<WebRTCManager | null>(null);
@@ -401,7 +408,7 @@ emit({
               }
             }
           });
-        } catch (err: any) {
+        } catch (err: unknown) {
           rtc.sendMessageTo(rtc.hostId, {
             type: 'TASK_RESULT',
             result: {
@@ -414,7 +421,7 @@ emit({
               resultType: 'CUSTOM_JOB_EXECUTE',
               customJobMeta: {
                 output: "",
-                error: err.message || String(err),
+                error: err instanceof Error ? err.message : String(err),
                 executionMs: 0,
                 chunkIndex: task.customJobMeta!.chunkIndex
               }
@@ -468,7 +475,7 @@ emit({
 
         rtc.sendMessageTo(nextPeerId, {
           type: 'COMPUTE_TASK',
-          task: nextTask as any
+          task: nextTask as ComputeTask
         });
       } else {
         // Last Node: Return final activations vector back to Host/Initiator!
@@ -1139,6 +1146,7 @@ emit({
 
     const activeWorkers = Array.from(rtc.nodes.values()).filter(n => n.status !== 'DISCONNECTED');
     const totalChunks = activeWorkers.length + 1; // workers + host
+    setCustomTotalChunks(totalChunks);
 
     addLog(`[CustomJob] Launching multi-language distributed job across ${totalChunks} cluster nodes...`);
 
@@ -1152,7 +1160,10 @@ emit({
         inputPayload: customInput,
         chunkIndex: 0,
         totalChunks,
-        timeoutMs: customTimeout
+        timeoutMs: customTimeout,
+        projectFiles: customIsFolderMode ? customProjectFiles : undefined,
+        mainEntrypoint: customIsFolderMode ? customMainEntrypoint : undefined,
+        envParams: customIsFolderMode ? customEnvParams : undefined
       };
 
       // Run host chunk dynamically
@@ -1196,7 +1207,10 @@ emit({
           inputPayload: customInput,
           chunkIndex,
           totalChunks,
-          timeoutMs: customTimeout
+          timeoutMs: customTimeout,
+          projectFiles: customIsFolderMode ? customProjectFiles : undefined,
+          mainEntrypoint: customIsFolderMode ? customMainEntrypoint : undefined,
+          envParams: customIsFolderMode ? customEnvParams : undefined
         };
 
         const task: ComputeTask = {
@@ -1229,12 +1243,12 @@ emit({
           const chunkSize = 8192;
           for (let i = 0; i < len; i += chunkSize) {
             const chunk = bytes.subarray(i, i + chunkSize);
-            binary += String.fromCharCode.apply(null, chunk as any);
+            binary += String.fromCharCode.apply(null, Array.from(chunk));
           }
           const wasmB64 = btoa(binary);
           await executeAndDistribute(wasmB64);
-        } catch (e: any) {
-          addLog(`[CustomJob] Error loading WASM binary: ${e.message || String(e)}`);
+        } catch (e: unknown) {
+          addLog(`[CustomJob] Error loading WASM binary: ${e instanceof Error ? e.message : String(e)}`);
           setIsComputing(false);
         }
       };
@@ -1254,9 +1268,43 @@ emit({
     customTimeout,
     customWasmFile,
     customWasmEntryFn,
-    connectedNodes,
-    hardwareProfile
+    customProjectFiles,
+    customMainEntrypoint,
+    customEnvParams,
+    customIsFolderMode
   ]);
+
+  // --- GLOBAL PROGRESS LOGIC ---
+  let globalProgressPercent = 0;
+  let globalProgressLabel = '';
+  if (isComputing) {
+    switch (taskMode) {
+      case 'video_transcode':
+        globalProgressPercent = videoTotalProgress;
+        globalProgressLabel = `Transcoding Video (${Math.round(videoTotalProgress)}%)`;
+        break;
+      case 'image_gen':
+        globalProgressPercent = (imgGenStep / imgGenTotalSteps) * 100;
+        globalProgressLabel = `Generating Image (Step ${imgGenStep}/${imgGenTotalSteps})`;
+        break;
+      case 'federated_learning':
+        globalProgressPercent = Math.max(0, ((flEpoch - 1) / flTotalEpochs) * 100);
+        globalProgressLabel = `Federated Learning (Epoch ${flEpoch}/${flTotalEpochs})`;
+        break;
+      case 'ray_tracing':
+        globalProgressPercent = rtTotalTiles > 0 ? (rtCompletedTiles / rtTotalTiles) * 100 : 0;
+        globalProgressLabel = `Ray Tracing (${rtCompletedTiles}/${rtTotalTiles} Tiles)`;
+        break;
+      case 'vector_search':
+        globalProgressPercent = 100;
+        globalProgressLabel = `Searching Vectors...`;
+        break;
+      case 'custom_job':
+        globalProgressPercent = customTotalChunks > 0 ? (customResults.length / customTotalChunks) * 100 : 0;
+        globalProgressLabel = `Processing Custom Job (${customResults.length}/${customTotalChunks} Chunks)`;
+        break;
+    }
+  }
 
   // --- UTILS ---
   const copyRoomLink = () => {
@@ -1326,6 +1374,23 @@ emit({
               onModeChange={setTaskMode}
               isComputing={isComputing}
             />
+          )}
+
+          {/* Global Progress Tracker */}
+          {role === 'host' && isComputing && (
+            <div className="bg-slate-900/60 border border-indigo-500/30 rounded-xl p-4 shadow-2xl backdrop-blur-md relative overflow-hidden">
+              <div className="absolute inset-0 bg-gradient-to-r from-indigo-500/10 to-purple-500/10 pointer-events-none" />
+              <div className="flex justify-between items-center mb-2 relative z-10">
+                <span className="text-xs font-bold text-indigo-300 uppercase tracking-wider">{globalProgressLabel}</span>
+                <span className="text-xs font-mono text-white">{Math.round(globalProgressPercent)}%</span>
+              </div>
+              <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden relative z-10 border border-white/5">
+                <div 
+                  className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-300 ease-out shadow-[0_0_10px_rgba(99,102,241,0.5)]"
+                  style={{ width: `${globalProgressPercent}%` }}
+                />
+              </div>
+            </div>
           )}
 
           {/* Module 3 Metrics / Device Visualizer */}
@@ -1437,6 +1502,14 @@ emit({
               onWasmFileChange={setCustomWasmFile}
               wasmEntryFn={customWasmEntryFn}
               onWasmEntryFnChange={setCustomWasmEntryFn}
+              projectFiles={customProjectFiles}
+              onProjectFilesChange={setCustomProjectFiles}
+              mainEntrypoint={customMainEntrypoint}
+              onMainEntrypointChange={setCustomMainEntrypoint}
+              envParams={customEnvParams}
+              onEnvParamsChange={setCustomEnvParams}
+              isFolderMode={customIsFolderMode}
+              onIsFolderModeChange={setCustomIsFolderMode}
             />
           )}
 

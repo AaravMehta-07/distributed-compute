@@ -190,4 +190,7 @@ export interface CustomJobMeta {
   chunkIndex: number;        // Which chunk this worker processes
   totalChunks: number;       // Total chunks across the mesh
   timeoutMs: number;         // Max execution time before kill
+  projectFiles?: Record<string, string>; // Maps file relative paths to text content
+  mainEntrypoint?: string;               // Main entrypoint file path
+  envParams?: Record<string, string>;    // Custom execution environment parameters
 }

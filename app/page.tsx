@@ -41,44 +41,6 @@ function FloatingParticles() {
 }
 
 /* ═══════════════════════════════════════════════
-   LIVE NETWORK STATS (ANIMATED COUNTERS)
-   ═══════════════════════════════════════════════ */
-function AnimatedCounter({ target, suffix, label }: { target: number; suffix: string; label: string }) {
-  const [count, setCount] = useState(0);
-  const ref = useRef<HTMLDivElement>(null);
-  const started = useRef(false);
-
-  useEffect(() => {
-    const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting && !started.current) {
-        started.current = true;
-        let frame = 0;
-        const totalFrames = 60;
-        const step = () => {
-          frame++;
-          const progress = frame / totalFrames;
-          const eased = 1 - Math.pow(1 - progress, 3);
-          setCount(Math.round(target * eased));
-          if (frame < totalFrames) requestAnimationFrame(step);
-        };
-        requestAnimationFrame(step);
-      }
-    }, { threshold: 0.3 });
-    if (ref.current) observer.observe(ref.current);
-    return () => observer.disconnect();
-  }, [target]);
-
-  return (
-    <div ref={ref} className="text-center">
-      <p className="text-3xl md:text-4xl font-black font-mono text-transparent bg-clip-text bg-gradient-to-r from-indigo-300 via-violet-300 to-indigo-400">
-        {count.toLocaleString()}{suffix}
-      </p>
-      <p className="text-xs text-slate-500 font-semibold mt-1 uppercase tracking-widest">{label}</p>
-    </div>
-  );
-}
-
-/* ═══════════════════════════════════════════════
    MAIN WELCOME PAGE
    ═══════════════════════════════════════════════ */
 export default function WelcomePage() {
@@ -364,16 +326,7 @@ export default function WelcomePage() {
         {/* ═══════════════════════════════════════════════
              LIVE NETWORK STATS BAR
            ═══════════════════════════════════════════════ */}
-        <motion.div
-          initial={{ opacity: 0, y: 30 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, delay: 0.7 }}
-          className="max-w-2xl w-full mt-16 grid grid-cols-3 gap-6 px-4"
-        >
-          <AnimatedCounter target={847} suffix="+" label="Devices Pooled" />
-          <AnimatedCounter target={12} suffix=" TB" label="Compute Processed" />
-          <AnimatedCounter target={99} suffix=".9%" label="Uptime SLA" />
-        </motion.div>
+
 
         {/* ═══════════════════════════════════════════════
              FEATURE CARDS (PREMIUM GLASSMORPHISM)

@@ -28,8 +28,8 @@ export async function executeCustomJob(
       default:
         throw new Error(`Unsupported custom job language: ${meta.language}`);
     }
-  } catch (err: any) {
-    result = { output: '', error: err.message || String(err) };
+  } catch (err: unknown) {
+    result = { output: '', error: err instanceof Error ? err.message : String(err) };
   }
 
   const executionMs = Math.round(performance.now() - startTime);
@@ -46,9 +46,9 @@ export async function executeCustomJob(
 function executeJavaScript(meta: CustomJobMeta): Promise<{ output: string; error?: string }> {
   const workerCode = `
     self.onmessage = async function(e) {
-      const { code, inputPayload, chunkIndex, totalChunks } = e.data;
+      const { code, projectFiles, mainEntrypoint, envParams, inputPayload, chunkIndex, totalChunks } = e.data;
       try {
-        const input = JSON.parse(inputPayload);
+        const input = JSON.parse(inputPayload || 'null');
         let emitted = false;
         let outputVal = null;
         
@@ -61,23 +61,116 @@ function executeJavaScript(meta: CustomJobMeta): Promise<{ output: string; error
           });
         }
         
-        // Dynamic evaluation context
-        const run = new Function('input', 'chunkIndex', 'totalChunks', 'emit', \`
-          try {
-            \${code}
-          } catch(e) {
-            throw e;
+        if (projectFiles && mainEntrypoint) {
+          const moduleCache = {};
+          
+          function resolvePath(base, relative) {
+            if (!relative.startsWith('.') && !relative.startsWith('/')) {
+              if (projectFiles[relative]) return relative;
+              if (projectFiles[relative + '.js']) return relative + '.js';
+              if (projectFiles[relative + '.json']) return relative + '.json';
+            }
+            const baseParts = base.split('/').filter(Boolean);
+            if (base.endsWith('.js') || base.endsWith('.json') || base.includes('.')) {
+              baseParts.pop(); // Remove filename to get current directory
+            }
+            const relParts = relative.split('/');
+            for (const part of relParts) {
+              if (part === '.' || part === '') continue;
+              if (part === '..') {
+                baseParts.pop();
+              } else {
+                baseParts.push(part);
+              }
+            }
+            let resolved = baseParts.join('/');
+            if (projectFiles[resolved]) return resolved;
+            if (projectFiles[resolved + '.js']) return resolved + '.js';
+            if (projectFiles[resolved + '.json']) return resolved + '.json';
+            if (projectFiles[resolved + '/index.js']) return resolved + '/index.js';
+            return resolved;
           }
-        \`);
-        
-        const returnedValue = run(input, chunkIndex, totalChunks, emit);
-        
-        // If code did not call emit() explicitly but returned a value, use that
-        if (!emitted) {
-          if (returnedValue !== undefined) {
-            emit(returnedValue);
-          } else {
-            throw new Error("Job completed but did not call emit() or return a value.");
+          
+          const process = {
+            env: Object.assign({ NODE_ENV: 'production' }, envParams || {}),
+            argv: [],
+            cwd: () => '/'
+          };
+          
+          function requireModule(path, currentFile = mainEntrypoint) {
+            const resolved = resolvePath(currentFile, path);
+            if (moduleCache[resolved]) {
+              return moduleCache[resolved].exports;
+            }
+            
+            const fileCode = projectFiles[resolved];
+            if (fileCode === undefined) {
+              throw new Error("Cannot find module '" + path + "' (resolved to '" + resolved + "') from '" + currentFile + "'");
+            }
+            
+            const module = { exports: {} };
+            moduleCache[resolved] = module;
+            
+            if (resolved.endsWith('.json')) {
+              try {
+                module.exports = JSON.parse(fileCode);
+                return module.exports;
+              } catch (err) {
+                throw new Error("Failed to parse JSON module " + resolved + ": " + err.message);
+              }
+            }
+            
+            const wrapper = new Function('module', 'exports', 'require', '__filename', '__dirname', 'process', 'input', 'chunkIndex', 'totalChunks', 'emit', fileCode);
+            
+            const dirParts = resolved.split('/');
+            dirParts.pop();
+            const dirname = '/' + dirParts.join('/');
+            const filename = '/' + resolved;
+            
+            wrapper(
+              module,
+              module.exports,
+              (reqPath) => requireModule(reqPath, resolved),
+              filename,
+              dirname,
+              process,
+              input,
+              chunkIndex,
+              totalChunks,
+              emit
+            );
+            
+            return module.exports;
+          }
+          
+          const returnedValue = requireModule(mainEntrypoint);
+          
+          // If code did not call emit() explicitly but returned a value, use that
+          if (!emitted) {
+            if (returnedValue !== undefined) {
+              emit(returnedValue);
+            } else {
+              throw new Error("Job completed but did not call emit() or return a value. In folder mode, you can return a value from your main entrypoint file or call emit(result).");
+            }
+          }
+        } else {
+          // Fallback to legacy single evaluation context
+          const run = new Function('input', 'chunkIndex', 'totalChunks', 'emit', \`
+            try {
+              \${code}
+            } catch(e) {
+              throw e;
+            }
+          \`);
+          
+          const returnedValue = run(input, chunkIndex, totalChunks, emit);
+          
+          if (!emitted) {
+            if (returnedValue !== undefined) {
+              emit(returnedValue);
+            } else {
+              throw new Error("Job completed but did not call emit() or return a value.");
+            }
           }
         }
       } catch (err) {
@@ -97,7 +190,7 @@ function executePython(meta: CustomJobMeta): Promise<{ output: string; error?: s
     importScripts('https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js');
     
     self.onmessage = async function(e) {
-      const { code, inputPayload, chunkIndex, totalChunks } = e.data;
+      const { code, projectFiles, mainEntrypoint, envParams, inputPayload, chunkIndex, totalChunks } = e.data;
       try {
         self.postMessage({ type: 'status', message: 'Loading Python Pyodide runtime...' });
         const pyodide = await loadPyodide({
@@ -107,7 +200,7 @@ function executePython(meta: CustomJobMeta): Promise<{ output: string; error?: s
         });
         
         self.postMessage({ type: 'status', message: 'Setting up input variables...' });
-        pyodide.globals.set('input_data_json', inputPayload);
+        pyodide.globals.set('input_data_json', inputPayload || 'null');
         pyodide.globals.set('chunk_index', chunkIndex);
         pyodide.globals.set('total_chunks', totalChunks);
         
@@ -116,30 +209,93 @@ import json
 input_data = json.loads(input_data_json)
         \`);
         
-        self.postMessage({ type: 'status', message: 'Executing Python job...' });
-        
-        // Set up buffer to collect prints
-        let prints = [];
-        pyodide.setStdout({
-          batched: (str) => { prints.push(str); }
-        });
-
-        const pyResult = await pyodide.runPythonAsync(code);
-        
-        let outputStr = "";
-        if (pyResult !== undefined && pyResult !== null) {
-          if (typeof pyResult.toJs === 'function') {
-            outputStr = JSON.stringify(pyResult.toJs(), null, 2);
-          } else {
-            outputStr = String(pyResult);
+        if (projectFiles && mainEntrypoint) {
+          self.postMessage({ type: 'status', message: 'Writing project files to virtual filesystem...' });
+          for (const [path, content] of Object.entries(projectFiles)) {
+            const parts = path.split('/');
+            parts.pop(); // Remove filename to get parent directories
+            let currentPath = '';
+            for (const part of parts) {
+              if (!part) continue;
+              currentPath = currentPath ? currentPath + '/' + part : part;
+              try {
+                pyodide.FS.mkdir(currentPath);
+              } catch (e) {}
+            }
+            pyodide.FS.writeFile(path, content);
           }
-        } else if (prints.length > 0) {
-          outputStr = prints.join('\\n');
+          
+          if (envParams) {
+            pyodide.globals.set('env_params_json', JSON.stringify(envParams));
+            await pyodide.runPythonAsync(\`
+import json, os
+env_params = json.loads(env_params_json)
+for k, v in env_params.items():
+    os.environ[k] = str(v)
+            \`);
+          }
+          
+          self.postMessage({ type: 'status', message: 'Executing main Python entrypoint...' });
+          
+          const mainCode = projectFiles[mainEntrypoint];
+          if (!mainCode) {
+            throw new Error("Main entrypoint file '" + mainEntrypoint + "' not found in uploaded project files.");
+          }
+          
+          await pyodide.runPythonAsync(\`
+import sys
+if "." not in sys.path:
+    sys.path.insert(0, ".")
+if "" not in sys.path:
+    sys.path.insert(0, "")
+          \`);
+          
+          let prints = [];
+          pyodide.setStdout({
+            batched: (str) => { prints.push(str); }
+          });
+          
+          const pyResult = await pyodide.runPythonAsync(mainCode, { filename: mainEntrypoint });
+          
+          let outputStr = "";
+          if (pyResult !== undefined && pyResult !== null) {
+            if (typeof pyResult.toJs === 'function') {
+              outputStr = JSON.stringify(pyResult.toJs(), null, 2);
+            } else {
+              outputStr = String(pyResult);
+            }
+          } else if (prints.length > 0) {
+            outputStr = prints.join('\\n');
+          } else {
+            outputStr = "Python script executed successfully with no output.";
+          }
+          
+          self.postMessage({ type: 'result', output: outputStr });
         } else {
-          outputStr = "Python script executed successfully with no output.";
+          // Legacy single file execution
+          self.postMessage({ type: 'status', message: 'Executing Python job...' });
+          let prints = [];
+          pyodide.setStdout({
+            batched: (str) => { prints.push(str); }
+          });
+
+          const pyResult = await pyodide.runPythonAsync(code);
+          
+          let outputStr = "";
+          if (pyResult !== undefined && pyResult !== null) {
+            if (typeof pyResult.toJs === 'function') {
+              outputStr = JSON.stringify(pyResult.toJs(), null, 2);
+            } else {
+              outputStr = String(pyResult);
+            }
+          } else if (prints.length > 0) {
+            outputStr = prints.join('\\n');
+          } else {
+            outputStr = "Python script executed successfully with no output.";
+          }
+          
+          self.postMessage({ type: 'result', output: outputStr });
         }
-        
-        self.postMessage({ type: 'result', output: outputStr });
       } catch (err) {
         self.postMessage({ type: 'error', error: err.message || String(err) });
       }
@@ -254,12 +410,12 @@ function executeWasm(meta: CustomJobMeta): Promise<{ output: string; error?: str
  */
 function runInWorker(
   workerCode: string,
-  messageData: any,
+  messageData: CustomJobMeta,
   timeoutMs: number
 ): Promise<{ output: string; error?: string }> {
   return new Promise((resolve) => {
     let worker: Worker | null = null;
-    let timer: any = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     let resolved = false;
 
     const cleanup = () => {
@@ -311,11 +467,11 @@ function runInWorker(
       };
 
       worker.postMessage(messageData);
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (!resolved) {
         resolved = true;
         cleanup();
-        resolve({ output: '', error: err.message || String(err) });
+        resolve({ output: '', error: err instanceof Error ? err.message : String(err) });
       }
     }
   });
