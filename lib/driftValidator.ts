@@ -52,6 +52,7 @@ export function calculateMSE(bufferA: ArrayBuffer, bufferB: ArrayBuffer): number
 export class DriftValidator {
   private sessions: Map<string, VerificationSession> = new Map();
   private blacklistedPeers: Set<string> = new Set();
+  private conflictCache: Map<string, { bufferA: ArrayBuffer; bufferB: ArrayBuffer }> = new Map();
   
   private onVerificationSuccess: (taskId: string, verifiedData: ArrayBuffer) => void;
   private onConflictDetected: (taskId: string, peerA: string, peerB: string) => void;
@@ -142,6 +143,12 @@ export class DriftValidator {
         session.status = 'CONFLICT';
         console.warn(`[DriftValidator] WARNING! Mathematical drift detected. MSE (${mse}) exceeds limit (${epsilon})`);
         
+        // Cache buffers for tie-breaker comparison before dropping them
+        this.conflictCache.set(taskId, {
+          bufferA: session.outputA.slice(0),
+          bufferB: session.outputB.slice(0)
+        });
+        
         // Drop both output arrays from current pool
         session.outputA = undefined;
         session.outputB = undefined;
@@ -167,21 +174,23 @@ export class DriftValidator {
    * Compares the tie-breaker result to identify and blacklist the anomalous peer
    */
   private resolveConflict(session: VerificationSession, epsilon: number) {
-    const { taskId, outputC, peerA, peerB, peerC } = session;
+    const { taskId, outputC, peerC } = session;
     
     if (!outputC || !peerC) {
       session.status = 'FAILED';
       return;
     }
 
-    // Recover previous runs (we ask the host to cache previous results or we store copies)
-    // For extreme memory safety, the host can re-evaluate or request tiebreaker.
-    // If outputA or outputB were dropped, we can compare directly with new incoming results
-    // of the re-issued task on Worker C.
-    // To identify the anomaly, we check which of the original workers matches the tiebreaker.
-    // Wait! To compare, we must have stored outputA and outputB before dropping them.
-    // Let's modify the drift detector to retain A and B buffers inside a temporary "conflict cache" 
-    // instead of fully erasing them, so we can run the comparison:
+    // Retrieve cached original buffers from conflict phase
+    const cached = this.conflictCache.get(taskId);
+    if (!cached) {
+      console.error(`[DriftValidator] No cached conflict buffers for Task: ${taskId}`);
+      session.status = 'FAILED';
+      return;
+    }
+
+    this.resolveConflictWithBuffers(taskId, cached.bufferA, cached.bufferB, outputC, epsilon);
+    this.conflictCache.delete(taskId);
   }
 
   /**

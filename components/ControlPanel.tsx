@@ -162,7 +162,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
             <div className="flex space-x-3">
               <button
                 type="submit"
-                disabled={isComputing || connectedNodes.length === 0}
+                disabled={isComputing}
                 className="flex items-center px-5 py-2.5 bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 text-white font-semibold text-sm rounded-xl shadow-lg shadow-indigo-500/20 transition disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none hover:-translate-y-0.5 active:translate-y-0"
               >
                 <Play className="w-4 h-4 mr-2" />
@@ -265,7 +265,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
               </div>
               <div>
                 <span className="text-slate-500">Device Model</span>
-                <p className="font-semibold text-slate-200 mt-0.5 truncate">{navigator.userAgent.split(' ')[0]} (Node)</p>
+                <p className="font-semibold text-slate-200 mt-0.5 truncate">{typeof navigator !== 'undefined' ? navigator.userAgent.split(' ')[0] : 'Browser'} (Node)</p>
               </div>
               <div>
                 <span className="text-slate-500">Benchmark Performance</span>

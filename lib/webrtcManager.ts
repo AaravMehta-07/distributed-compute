@@ -328,18 +328,20 @@ export class WebRTCManager {
 
   // --- THE SCREEN WAKE LOCK LAYER ---
   private async setupWakeLock() {
-    // Request initial lock
-    await this.requestWakeLock();
+    // Only register listeners here. The actual wake lock request
+    // happens after PeerJS is initialized via initialize() -> requestWakeLock()
 
     // Persist wake lock on window focus or visibility return
     document.addEventListener('visibilitychange', async () => {
-      if (document.visibilityState === 'visible') {
+      if (document.visibilityState === 'visible' && this.peer) {
         await this.requestWakeLock();
       }
     });
 
     window.addEventListener('focus', async () => {
-      await this.requestWakeLock();
+      if (this.peer) {
+        await this.requestWakeLock();
+      }
     });
   }
 
@@ -422,6 +424,8 @@ export class WebRTCManager {
     this.peer = null;
     this.peerId = '';
     this.hostId = '';
+    this.isHost = false;
+    WebRTCManager.instance = null;
   }
 }
 export default WebRTCManager;

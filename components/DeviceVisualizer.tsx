@@ -310,7 +310,7 @@ export const DeviceVisualizer: React.FC<DeviceVisualizerProps> = ({
       </div>
 
       {/* CSS Animation injection for moving neon pulses along paths */}
-      <style jsx global>{`
+      <style dangerouslySetInnerHTML={{ __html: `
         @keyframes strokeFlow {
           to {
             stroke-dashoffset: -100;
@@ -319,7 +319,7 @@ export const DeviceVisualizer: React.FC<DeviceVisualizerProps> = ({
         .animate-flow {
           animation: strokeFlow 3s linear infinite;
         }
-      `}</style>
+      ` }} />
     </motion.div>
   );
 };

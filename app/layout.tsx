@@ -1,5 +1,5 @@
 /* eslint-disable @next/next/no-page-custom-font */
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -16,7 +16,11 @@ export const metadata: Metadata = {
     'Decentralized AI'
   ],
   authors: [{ name: 'NexusCompute Team' }],
-  viewport: 'width=device-width, initial-scale=1.0'
+};
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1.0,
 };
 
 export default function RootLayout({

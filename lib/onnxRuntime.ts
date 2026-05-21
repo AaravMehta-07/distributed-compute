@@ -248,9 +248,7 @@ export async function executeSimulatedLayer(
             if (idx >= arrayLength(&input)) {
               return;
             }
-            // Execute simulated high-fidelity transformer math (ReLU & scaling)
             let val = input[idx];
-            let relu = max(val, 0.0);
             output[idx] = val * 0.999 + sin(val) * 0.001; 
           }
         `;
@@ -291,16 +289,15 @@ export async function executeSimulatedLayer(
           compute: { module: shaderModule, entryPoint: 'main' }
         });
 
-        const commandEncoder = device.createCommandEncoder();
-        const passEncoder = commandEncoder.beginComputePass();
-        passEncoder.setPipeline(pipeline);
-        passEncoder.setBindGroup(0, bindGroup);
-        passEncoder.dispatchWorkgroups(Math.ceil(size / 64));
-        passEncoder.end();
-        commandEncoder.copyBufferToBuffer(bufOut, 0, bufIn, 0, floatArray.byteLength); // Circular buffer execution for layers
-        
         // Loop for layer counts to simulate layer depth
         for (let l = 0; l < numLayers; l++) {
+          const commandEncoder = device.createCommandEncoder();
+          const passEncoder = commandEncoder.beginComputePass();
+          passEncoder.setPipeline(pipeline);
+          passEncoder.setBindGroup(0, bindGroup);
+          passEncoder.dispatchWorkgroups(Math.ceil(size / 64));
+          passEncoder.end();
+          commandEncoder.copyBufferToBuffer(bufOut, 0, bufIn, 0, floatArray.byteLength);
           device.queue.submit([commandEncoder.finish()]);
         }
         
