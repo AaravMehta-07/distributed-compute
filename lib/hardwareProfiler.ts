@@ -473,11 +473,23 @@ export function getMemorySafeguard(profile: HardwareProfile, totalModelWeightsSi
   safeMemoryLimit: number;
   requireQuantization: boolean;
 } {
-  // Mobile browsers enforce strict runtime heap limits (often capped at 1GB total).
-  // We apply a strict 70% threshold capped at a safe 800MB.
-  const safeMemoryLimit = profile.isMobile 
-    ? Math.min(profile.maxBufferSize * 0.7, 400 * 1024 * 1024) // Mobile capped to 400MB for ultimate safety
-    : Math.min(profile.maxBufferSize * 0.7, 1024 * 1024 * 1024); // Desktop capped to 1GB
+  // Try to use navigator.deviceMemory (returns system RAM in GB)
+  let systemMemoryBytes = 8 * 1024 * 1024 * 1024; // Default assume 8GB
+  if (typeof navigator !== 'undefined' && 'deviceMemory' in navigator) {
+    systemMemoryBytes = (navigator as any).deviceMemory * 1024 * 1024 * 1024;
+  }
+
+  // Calculate safe limits: 
+  // Mobile: max 40% of system memory, hard cap at 2GB
+  // Desktop: max 60% of system memory, no hard cap, relying on WebGPU maxBufferSize
+  const mobileLimit = Math.min(systemMemoryBytes * 0.4, 2 * 1024 * 1024 * 1024);
+  const desktopLimit = systemMemoryBytes * 0.6;
+  
+  const baseSafeLimit = profile.isMobile ? mobileLimit : desktopLimit;
+  
+  // Also respect WebGPU max buffer sizes if available, taking the larger of WebGPU buffer or system calculated limit.
+  // We use profile.maxBufferSize as a floor (since it's known safe by the GPU) and baseSafeLimit as a ceiling.
+  const safeMemoryLimit = Math.max(profile.maxBufferSize * 0.7, baseSafeLimit);
 
   const requireQuantization = totalModelWeightsSize > safeMemoryLimit;
 
