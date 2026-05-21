@@ -584,15 +584,7 @@ export const CustomJobPanel: React.FC<CustomJobPanelProps> = ({
               Single Script
             </button>
             <button
-              onClick={() => {
-                if (Object.keys(projectFiles).length === 0) {
-                  // Trigger upload dialog programmatically or show alert
-                  const inputEl = document.getElementById('portal-folder-input');
-                  inputEl?.click();
-                } else {
-                  onIsFolderModeChange(true);
-                }
-              }}
+              onClick={() => onIsFolderModeChange(true)}
               disabled={isRunning || language === 'wasm'}
               className={`py-1 rounded-md text-[9px] font-bold transition flex items-center justify-center ${
                 isFolderMode && language !== 'wasm'
