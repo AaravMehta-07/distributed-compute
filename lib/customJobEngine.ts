@@ -14,8 +14,16 @@ export async function executeCustomJob(
   const startTime = performance.now();
   let result: { output: string; error?: string };
 
+  let effectiveLanguage = meta.language;
+  if (meta.projectFiles && meta.mainEntrypoint) {
+    const ext = meta.mainEntrypoint.split('.').pop()?.toLowerCase();
+    if (ext === 'py') effectiveLanguage = 'python';
+    else if (ext === 'js' || ext === 'ts' || ext === 'mjs' || ext === 'cjs') effectiveLanguage = 'javascript';
+    else if (ext === 'wasm') effectiveLanguage = 'wasm';
+  }
+
   try {
-    switch (meta.language) {
+    switch (effectiveLanguage) {
       case 'javascript':
         result = await executeJavaScript(meta);
         break;
