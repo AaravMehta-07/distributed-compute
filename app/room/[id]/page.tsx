@@ -229,24 +229,21 @@ function RoomPageContent() {
     
     // Convert map to plain record
     const allocRecord: Record<string, [number, number]> = {};
-    const hostRange: [number, number] = [0, 0];
-
-    // Allocate layers. The Host takes whatever is not allocated to workers, or participates in chain
-    // To make it elegant, workers do the heavy processing, and Host handles the remaining, e.g. first/last layer blocks
-    // Let's allocate layers cleanly:
-    let workerLayersAssignedCount = 0;
     allocations.forEach((range, peerId) => {
       allocRecord[peerId] = range;
-      workerLayersAssignedCount += (range[1] - range[0] + 1);
     });
 
-    // Host handles whatever layers remain, or we partition Host as part of the loop.
-    // Let's say Host takes the first layers [0..2] and workers take the rest, or Host takes nothing if workers cover all.
-    // For simplicity, let's include the Host in our allocation record!
-    // We update Host state
-    const firstWorker = sortedWorkers(activeWorkers)[0];
-    const hostEnd = firstWorker ? Math.max(0, (manualLayerAllocation[firstWorker.peerId] || [0, 0])[0] - 1) : 0;
-    setAssignedLayers([0, hostEnd]);
+    // Determine the host's layer range from the freshly computed allocations
+    // Host handles any layers before the first worker's start range
+    const sorted = sortedWorkers(activeWorkers);
+    const firstWorkerId = sorted[0]?.peerId;
+    const firstWorkerRange = firstWorkerId ? allocRecord[firstWorkerId] : undefined;
+    if (firstWorkerRange && firstWorkerRange[0] > 0) {
+      setAssignedLayers([0, firstWorkerRange[0] - 1]);
+    } else {
+      // Workers cover from layer 0, host acts as orchestrator only
+      setAssignedLayers([0, 0]);
+    }
 
     setManualLayerAllocation(allocRecord);
 
@@ -257,7 +254,7 @@ function RoomPageContent() {
     });
     setTotalFlops(combinedFlops);
     
-    addLog(`Pipeline split successfully! Shard bounds updated.`);
+    addLog(`Pipeline split successfully! Shard bounds updated for ${activeWorkers.length} workers.`);
   };
 
   const sortedWorkers = (workers: NetworkNode[]) => {
@@ -871,18 +868,23 @@ function RoomPageContent() {
                 <span className="text-xs font-semibold text-slate-300 tracking-wider uppercase flex items-center">
                   <Sparkles className="w-3.5 h-3.5 mr-1.5 text-indigo-400" /> Pipeline Conversational Stream
                 </span>
-                {isComputing && (
-                  <span className="text-[9px] bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded animate-pulse">
-                    GENERATING
+                <div className="flex items-center space-x-2">
+                  {isComputing && (
+                    <span className="text-[9px] bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded animate-pulse">
+                      GENERATING
+                    </span>
+                  )}
+                  <span className="text-[9px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded font-mono">
+                    {connectedNodes.length === 0 ? 'Solo Host' : `${connectedNodes.length} worker${connectedNodes.length !== 1 ? 's' : ''}`}
                   </span>
-                )}
+                </div>
               </div>
 
               {/* Chat Stream History */}
-              <div className="flex-1 overflow-y-auto space-y-3 pr-1 text-xs min-h-[150px] max-h-[250px] mb-3 scrollbar-thin">
+              <div className="flex-1 overflow-y-auto space-y-3 pr-1 text-xs min-h-[120px] max-h-[200px] mb-3 scrollbar-thin">
                 {chatHistory.length === 0 && !currentResponse && (
                   <div className="h-full flex items-center justify-center text-slate-500 text-center leading-relaxed px-4">
-                    Submit a prompt to stream output tokens generated dynamically by the WebRTC cluster.
+                    Type a prompt below to run inference{connectedNodes.length === 0 ? ' locally on this device' : ' across the WebRTC cluster'}.
                   </div>
                 )}
 
@@ -906,12 +908,41 @@ function RoomPageContent() {
                 {currentResponse && (
                   <div className="p-3 rounded-xl bg-indigo-500/5 border border-indigo-500/25 text-indigo-200 leading-relaxed animate-pulse">
                     <span className="block text-[9px] font-bold text-indigo-400 mb-1">
-                      GENERATING TOKENS P2P...
+                      GENERATING TOKENS{connectedNodes.length > 0 ? ' P2P' : ' LOCALLY'}...
                     </span>
                     <p>{currentResponse}<span className="inline-block w-1.5 h-3 bg-indigo-400 ml-0.5 animate-ping" /></p>
                   </div>
                 )}
               </div>
+
+              {/* Quick Prompt Input directly in chat panel */}
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (promptInput.trim() && !isComputing) {
+                    handleTriggerPrompt(promptInput.trim());
+                    setPromptInput('');
+                  }
+                }}
+                className="flex space-x-2 mb-3"
+              >
+                <input
+                  type="text"
+                  value={promptInput}
+                  onChange={(e) => setPromptInput(e.target.value)}
+                  placeholder={isComputing ? 'Generating...' : 'Type a prompt and press Enter...'}
+                  disabled={isComputing}
+                  className="flex-1 bg-slate-950/80 border border-white/8 rounded-xl px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/40 focus:ring-1 focus:ring-indigo-500/20 transition disabled:opacity-50 font-mono"
+                />
+                <button
+                  type="submit"
+                  disabled={isComputing || !promptInput.trim()}
+                  className="px-3 py-2 bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-400 hover:to-violet-500 text-white rounded-xl text-xs font-bold transition disabled:opacity-40 disabled:cursor-not-allowed flex items-center"
+                >
+                  <Play className="w-3 h-3 mr-1" />
+                  Run
+                </button>
+              </form>
 
               {/* Redundancy MapReduce Actions */}
               <div className="border-t border-white/5 pt-3 space-y-2 mt-auto">
@@ -980,6 +1011,45 @@ function RoomPageContent() {
 
               <div className="border-t border-white/5 pt-3 mt-3 text-[10px] text-slate-500 leading-relaxed text-center font-sans">
                 Keep this browser window open. Tab minimizes or app freezes automatically triggers dynamic model re-shards to protect peer cluster state integrity.
+              </div>
+            </div>
+          )}
+
+          {/* Cluster Logs (visible for both Host and Worker) */}
+          {role === 'host' && (
+            <div className="bg-slate-900/60 backdrop-blur-xl border border-white/10 rounded-2xl p-4 relative overflow-hidden transition-all duration-300">
+              <div className="flex items-center justify-between border-b border-white/5 pb-2 mb-3">
+                <span className="text-xs font-semibold text-slate-300 tracking-wider uppercase flex items-center">
+                  <Terminal className="w-3.5 h-3.5 mr-1.5 text-indigo-400" /> Cluster Event Log
+                </span>
+                <span className="text-[9px] text-slate-500 font-mono">{clusterLogs.length} events</span>
+              </div>
+              <div className="bg-slate-950/80 border border-white/5 rounded-xl p-3 font-mono text-[10px] space-y-1.5 max-h-[180px] overflow-y-auto pr-1 scrollbar-thin">
+                {clusterLogs.length === 0 ? (
+                  <div className="text-slate-600 flex items-center justify-center py-4">
+                    Waiting for cluster events...
+                  </div>
+                ) : (
+                  clusterLogs.map((log, idx) => (
+                    <div
+                      key={idx}
+                      className={`leading-normal border-l-2 pl-2 ${
+                        log.includes('Error')
+                          ? 'text-rose-400 border-rose-500/60'
+                          : log.includes('WebRTC') || log.includes('peer')
+                          ? 'text-indigo-400 border-indigo-500/60'
+                          : log.includes('Device') || log.includes('Profile')
+                          ? 'text-amber-400 border-amber-500/60'
+                          : log.includes('Pipeline') || log.includes('Shard')
+                          ? 'text-emerald-400 border-emerald-500/60'
+                          : 'text-slate-400 border-slate-700'
+                      }`}
+                    >
+                      {log}
+                    </div>
+                  ))
+                )}
+                <div ref={logsEndRef} />
               </div>
             </div>
           )}
