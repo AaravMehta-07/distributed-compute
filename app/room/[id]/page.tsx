@@ -26,7 +26,7 @@ import {
   PipelineTask
 } from '../../../lib/shardingEngine';
 import { DriftValidator, MSELog } from '../../../lib/driftValidator';
-import { NetworkNode, HardwareProfile, NetworkMessage, TensorPayload, ComputeTask, TaskMode, VectorSearchMatch, RayTraceTileMeta } from '../../../types/network';
+import { NetworkNode, HardwareProfile, NetworkMessage, TensorPayload, ComputeTask, TaskMode, VectorSearchMatch, RayTraceTileMeta, CustomJobLanguage, CustomJobMeta } from '../../../types/network';
 import { executeSimulatedLayer } from '../../../lib/onnxRuntime';
 
 // New Compute Engines
@@ -35,6 +35,7 @@ import { generateBaseWeights, computeGradients, aggregateGradients, FL_CONFIG } 
 import { generateSimulatedFrames, splitVideoIntoChunks, processVideoChunk, VIDEO_CONFIG, VideoFilterType } from '../../../lib/videoTranscoderEngine';
 import { generateCorpus, generateEmbedding, shardVectorIndex, serializeEmbeddingShard, cosineSimilaritySearch, mergeTopK, VECTOR_CONFIG } from '../../../lib/vectorSearchEngine';
 import { generateScene, generateTiles, renderTile, RT_CONFIG } from '../../../lib/rayTracerEngine';
+import { executeCustomJob, splitWorkload } from '../../../lib/customJobEngine';
 
 // Components
 import { ControlPanel } from '../../../components/ControlPanel';
@@ -46,6 +47,7 @@ import { FederatedLearningPanel } from '../../../components/FederatedLearningPan
 import { VideoTranscodePanel } from '../../../components/VideoTranscodePanel';
 import { VectorSearchPanel } from '../../../components/VectorSearchPanel';
 import { RayTracePanel } from '../../../components/RayTracePanel';
+import { CustomJobPanel } from '../../../components/CustomJobPanel';
 import confetti from 'canvas-confetti';
 
 export const dynamic = 'force-dynamic';
@@ -130,6 +132,34 @@ function RoomPageContent() {
   const [rtCompletedTiles, setRtCompletedTiles] = useState(0);
   const [rtSPP, setRtSPP] = useState(RT_CONFIG.defaultSPP);
   const [rtBounces, setRtBounces] = useState(RT_CONFIG.defaultBounces);
+
+  // Custom Job State
+  const [customLang, setCustomLang] = useState<CustomJobLanguage>('javascript');
+  const [customCode, setCustomCode] = useState(`// Monte Carlo estimation of Pi
+// Each worker computes a segment of samples
+const samples = input || 1000000;
+let inside = 0;
+
+for (let i = 0; i < samples; i++) {
+  const x = Math.random();
+  const y = Math.random();
+  if (x * x + y * y <= 1) {
+    inside++;
+  }
+}
+
+const piEstimate = (4 * inside) / samples;
+emit({ 
+  piEstimate, 
+  inside, 
+  samples, 
+  chunkIndex 
+});`);
+  const [customInput, setCustomInput] = useState('1000000');
+  const [customTimeout, setCustomTimeout] = useState(30000);
+  const [customResults, setCustomResults] = useState<Array<{ chunkIndex: number; peerId: string; output: string; error?: string; executionMs: number }>>([]);
+  const [customWasmFile, setCustomWasmFile] = useState<File | null>(null);
+  const [customWasmEntryFn, setCustomWasmEntryFn] = useState('run');
 
   // --- REFS ---
   const rtcRef = useRef<WebRTCManager | null>(null);
@@ -341,7 +371,63 @@ function RoomPageContent() {
 
     // 3. Compute Task (Worker receives from Host or predecessor Worker)
     if (msg.type === 'COMPUTE_TASK') {
-      const task = msg.task as unknown as PipelineTask;
+      const task = msg.task;
+      
+      if (task.type === 'CUSTOM_JOB_EXECUTE') {
+        setIsComputing(true);
+        setActiveNodeId(rtc.peerId);
+        addLog(`[CustomJob] Received distributed chunk ${task.customJobMeta?.chunkIndex} from Host.`);
+        
+        try {
+          const res = await executeCustomJob(task.customJobMeta!);
+          
+          addLog(`[CustomJob] Chunk ${task.customJobMeta?.chunkIndex} executed in ${res.executionMs}ms.`);
+          
+          rtc.sendMessageTo(rtc.hostId, {
+            type: 'TASK_RESULT',
+            result: {
+              taskId: task.taskId,
+              peerId: rtc.peerId,
+              outputData: new ArrayBuffer(0),
+              dimensions: [],
+              executionTimeMs: res.executionMs,
+              timestamp: getCurrentTime(),
+              resultType: 'CUSTOM_JOB_EXECUTE',
+              customJobMeta: {
+                output: res.output,
+                error: res.error,
+                executionMs: res.executionMs,
+                chunkIndex: task.customJobMeta!.chunkIndex
+              }
+            }
+          });
+        } catch (err: any) {
+          rtc.sendMessageTo(rtc.hostId, {
+            type: 'TASK_RESULT',
+            result: {
+              taskId: task.taskId,
+              peerId: rtc.peerId,
+              outputData: new ArrayBuffer(0),
+              dimensions: [],
+              executionTimeMs: 0,
+              timestamp: getCurrentTime(),
+              resultType: 'CUSTOM_JOB_EXECUTE',
+              customJobMeta: {
+                output: "",
+                error: err.message || String(err),
+                executionMs: 0,
+                chunkIndex: task.customJobMeta!.chunkIndex
+              }
+            }
+          });
+        } finally {
+          setIsComputing(false);
+          setActiveNodeId(null);
+        }
+        return;
+      }
+
+      const pipelineTask = msg.task as unknown as PipelineTask;
       setIsComputing(true);
       setActiveNodeId(rtc.peerId);
       
@@ -351,7 +437,7 @@ function RoomPageContent() {
       const engineName = myProfile ? myProfile.engine : 'WASM_SIMD';
       
       const { outputBuffer, nextPeerId } = await shardingEngine.current.executePipelineShard(
-        task,
+        pipelineTask,
         engineName
       );
       
@@ -361,9 +447,9 @@ function RoomPageContent() {
 
       // Binary packaging for next node target
       const targetPayload: TensorPayload = {
-        taskId: task.taskId,
-        layerRange: task.layerRange || [0, 0],
-        dimensions: task.dimensions,
+        taskId: pipelineTask.taskId,
+        layerRange: pipelineTask.layerRange || [0, 0],
+        dimensions: pipelineTask.dimensions,
         dataType: 'float32',
         tensorBuffer: outputBuffer
       };
@@ -374,15 +460,15 @@ function RoomPageContent() {
         
         // Wrap back into pipeline task with incremented index
         const nextTask = {
-          ...task,
-          currentChainIndex: task.currentChainIndex + 1,
+          ...pipelineTask,
+          currentChainIndex: pipelineTask.currentChainIndex + 1,
           layerRange: manualLayerAllocation[nextPeerId] || [0, 0],
           inputData: outputBuffer
         };
 
         rtc.sendMessageTo(nextPeerId, {
           type: 'COMPUTE_TASK',
-          task: nextTask
+          task: nextTask as any
         });
       } else {
         // Last Node: Return final activations vector back to Host/Initiator!
@@ -391,10 +477,10 @@ function RoomPageContent() {
         rtc.sendMessageTo(rtc.hostId, {
           type: 'TASK_RESULT',
           result: {
-            taskId: task.taskId,
+            taskId: pipelineTask.taskId,
             peerId: rtc.peerId,
             outputData: outputBuffer,
-            dimensions: task.dimensions,
+            dimensions: pipelineTask.dimensions,
             executionTimeMs: elapsedMs,
             timestamp: getCurrentTime()
           }
@@ -406,6 +492,42 @@ function RoomPageContent() {
     // 4. Task Result (Host receives from final Worker)
     if (msg.type === 'TASK_RESULT') {
       const res = msg.result;
+      
+      if (res.resultType === 'CUSTOM_JOB_EXECUTE') {
+        const customMeta = res.customJobMeta;
+        if (customMeta) {
+          setCustomResults(prev => {
+            const filtered = prev.filter(r => r.chunkIndex !== res.customJobMeta?.chunkIndex);
+            const newResults = [
+              ...filtered,
+              {
+                chunkIndex: res.customJobMeta!.chunkIndex,
+                peerId: res.peerId,
+                output: customMeta.output,
+                error: customMeta.error,
+                executionMs: customMeta.executionMs
+              }
+            ].sort((a, b) => a.chunkIndex - b.chunkIndex);
+            
+            const activeWorkers = Array.from(rtc.nodes.values()).filter(n => n.status !== 'DISCONNECTED');
+            const totalExpected = activeWorkers.length + 1;
+            
+            if (newResults.length === totalExpected) {
+              setIsComputing(false);
+              addLog(`[CustomJob] All ${totalExpected} chunks completed across cluster!`);
+              confetti({
+                particleCount: 65,
+                spread: 55,
+                origin: { y: 0.7 }
+              });
+            }
+            
+            return newResults;
+          });
+        }
+        return;
+      }
+
       const taskState = activeTaskPayloads.current.get(res.taskId);
       if (!taskState) return;
 
@@ -1005,6 +1127,137 @@ function RoomPageContent() {
     confetti({ particleCount: 80, spread: 60, origin: { y: 0.7 } });
   }, [isComputing, rtSPP, rtBounces]);
 
+  // --- CUSTOM JOB CLUSTER HANDLER ---
+  const handleCustomJob = useCallback(async () => {
+    if (isComputing) return;
+
+    const rtc = rtcRef.current;
+    if (!rtc) return;
+
+    setIsComputing(true);
+    setCustomResults([]);
+
+    const activeWorkers = Array.from(rtc.nodes.values()).filter(n => n.status !== 'DISCONNECTED');
+    const totalChunks = activeWorkers.length + 1; // workers + host
+
+    addLog(`[CustomJob] Launching multi-language distributed job across ${totalChunks} cluster nodes...`);
+
+    const executeAndDistribute = async (wasmBinaryB64?: string) => {
+      // 1. Host locally executes chunk 0
+      const hostMeta: CustomJobMeta = {
+        language: customLang,
+        code: customCode,
+        wasmBinaryB64,
+        wasmEntryFn: customWasmEntryFn,
+        inputPayload: customInput,
+        chunkIndex: 0,
+        totalChunks,
+        timeoutMs: customTimeout
+      };
+
+      // Run host chunk dynamically
+      executeCustomJob(hostMeta).then(res => {
+        addLog(`[CustomJob] Host local chunk 0 completed in ${res.executionMs}ms.`);
+        setCustomResults(prev => {
+          const filtered = prev.filter(r => r.chunkIndex !== 0);
+          const newResults = [
+            ...filtered,
+            {
+              chunkIndex: 0,
+              peerId: 'host',
+              output: res.output,
+              error: res.error,
+              executionMs: res.executionMs
+            }
+          ].sort((a, b) => a.chunkIndex - b.chunkIndex);
+
+          if (newResults.length === totalChunks) {
+            setIsComputing(false);
+            addLog(`[CustomJob] All ${totalChunks} chunks completed across cluster!`);
+            confetti({
+              particleCount: 65,
+              spread: 55,
+              origin: { y: 0.7 }
+            });
+          }
+          return newResults;
+        });
+      });
+
+      // 2. Dispatch chunks 1..N to connected workers
+      const sorted = sortedWorkers(activeWorkers);
+      sorted.forEach((worker, idx) => {
+        const chunkIndex = idx + 1;
+        const workerMeta: CustomJobMeta = {
+          language: customLang,
+          code: customCode,
+          wasmBinaryB64,
+          wasmEntryFn: customWasmEntryFn,
+          inputPayload: customInput,
+          chunkIndex,
+          totalChunks,
+          timeoutMs: customTimeout
+        };
+
+        const task: ComputeTask = {
+          taskId: `custom-job-${generateRandomId()}`,
+          type: 'CUSTOM_JOB_EXECUTE',
+          inputData: new ArrayBuffer(0),
+          dimensions: [],
+          timestamp: getCurrentTime(),
+          customJobMeta: workerMeta
+        };
+
+        addLog(`[CustomJob] Sending chunk ${chunkIndex} to Worker ${worker.peerId.slice(0, 6)}...`);
+
+        rtc.sendMessageTo(worker.peerId, {
+          type: 'COMPUTE_TASK',
+          task
+        });
+      });
+    };
+
+    if (customLang === 'wasm' && customWasmFile) {
+      addLog(`[CustomJob] Reading WebAssembly binary "${customWasmFile.name}"...`);
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          const arrayBuffer = reader.result as ArrayBuffer;
+          const bytes = new Uint8Array(arrayBuffer);
+          let binary = '';
+          const len = bytes.byteLength;
+          const chunkSize = 8192;
+          for (let i = 0; i < len; i += chunkSize) {
+            const chunk = bytes.subarray(i, i + chunkSize);
+            binary += String.fromCharCode.apply(null, chunk as any);
+          }
+          const wasmB64 = btoa(binary);
+          await executeAndDistribute(wasmB64);
+        } catch (e: any) {
+          addLog(`[CustomJob] Error loading WASM binary: ${e.message || String(e)}`);
+          setIsComputing(false);
+        }
+      };
+      reader.onerror = () => {
+        addLog('[CustomJob] FileReader failed to read WASM file.');
+        setIsComputing(false);
+      };
+      reader.readAsArrayBuffer(customWasmFile);
+    } else {
+      await executeAndDistribute();
+    }
+  }, [
+    isComputing,
+    customLang,
+    customCode,
+    customInput,
+    customTimeout,
+    customWasmFile,
+    customWasmEntryFn,
+    connectedNodes,
+    hardwareProfile
+  ]);
+
   // --- UTILS ---
   const copyRoomLink = () => {
     const link = `${window.location.origin}/room/${roomId}?role=worker`;
@@ -1164,6 +1417,26 @@ function RoomPageContent() {
               onSPPChange={setRtSPP}
               onBouncesChange={setRtBounces}
               onStartRender={handleRayTrace}
+            />
+          )}
+
+          {role === 'host' && taskMode === 'custom_job' && (
+            <CustomJobPanel
+              language={customLang}
+              onLanguageChange={setCustomLang}
+              code={customCode}
+              onCodeChange={setCustomCode}
+              inputData={customInput}
+              onInputChange={setCustomInput}
+              timeoutMs={customTimeout}
+              onTimeoutChange={setCustomTimeout}
+              isRunning={isComputing && taskMode === 'custom_job'}
+              onRun={handleCustomJob}
+              results={customResults}
+              wasmFile={customWasmFile}
+              onWasmFileChange={setCustomWasmFile}
+              wasmEntryFn={customWasmEntryFn}
+              onWasmEntryFnChange={setCustomWasmEntryFn}
             />
           )}
 

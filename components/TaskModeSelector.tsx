@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { motion } from 'framer-motion';
-import { Brain, Image, GraduationCap, Film, Search, Box } from 'lucide-react';
+import { Brain, Image, GraduationCap, Film, Search, Box, Code2 } from 'lucide-react';
 import { TaskMode } from '../types/network';
 
 interface TaskModeSelectorProps {
@@ -73,6 +73,15 @@ const MODES: Array<{
     color: 'text-rose-400',
     bgGlow: 'bg-rose-500/20',
     description: 'Cooperative path tracing 3D render farm',
+  },
+  {
+    id: 'custom_job',
+    label: 'Custom Job',
+    shortLabel: 'Custom',
+    icon: Code2,
+    color: 'text-orange-400',
+    bgGlow: 'bg-orange-500/20',
+    description: 'Run any code in any language across the mesh',
   },
 ];
 

@@ -3,6 +3,7 @@ import { HardwareProfile } from '../types/network';
 
 /**
  * Checks if the current browser and hardware supports WebGPU
+ * Tries 'high-performance' first, falls back to default adapter
  */
 export async function checkWebGPUSupport(): Promise<{
   supported: boolean;
@@ -15,7 +16,15 @@ export async function checkWebGPUSupport(): Promise<{
   }
 
   try {
-    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    // Try high-performance first (targets discrete GPU)
+    let adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    
+    // If that returned null or an integrated GPU, try without preference
+    // Some drivers respond better to the default request
+    if (!adapter) {
+      adapter = await navigator.gpu.requestAdapter();
+    }
+    
     if (!adapter) {
       return { supported: false, maxBufferSize: 0, maxStorageBufferBindingSize: 0 };
     }
@@ -39,6 +48,69 @@ export async function checkWebGPUSupport(): Promise<{
     return { supported: false, maxBufferSize: 0, maxStorageBufferBindingSize: 0 };
   }
 }
+
+/**
+ * Detects the real GPU renderer via WebGL's WEBGL_debug_renderer_info extension.
+ * This is critical on NVIDIA Optimus / AMD Switchable laptops where WebGPU may
+ * be routed to the integrated GPU, but WebGL reliably exposes the discrete GPU name.
+ */
+function detectGPUViaWebGL(): { renderer: string; vendor: string } | null {
+  if (typeof document === 'undefined') return null;
+  
+  try {
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+    if (!gl) return null;
+
+    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+    if (!debugInfo) return null;
+
+    const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || '';
+    const vendor = gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) || '';
+
+    // Clean up the canvas context
+    const loseContext = gl.getExtension('WEBGL_lose_context');
+    if (loseContext) loseContext.loseContext();
+
+    return { renderer, vendor };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Classifies GPU vendor from a combined info string.
+ * Returns vendor name and whether it is a discrete GPU.
+ */
+function classifyGPU(combined: string, isMobile: boolean): {
+  gpuVendor: HardwareProfile['gpuVendor'];
+  acceleratorType: HardwareProfile['acceleratorType'];
+} {
+  const s = combined.toLowerCase();
+
+  if (s.includes('nvidia') || s.includes('geforce') || s.includes('rtx') || s.includes('gtx') || s.includes('quadro') || s.includes('tesla')) {
+    return { gpuVendor: 'NVIDIA', acceleratorType: 'discrete_gpu' };
+  }
+  if (s.includes('amd') || s.includes('radeon') || s.includes('rx ') || s.includes('vega') || s.includes('navi') || s.includes('rdna')) {
+    const isDiscrete = s.includes('rx ') || s.includes('radeon pro') || s.includes('navi') || s.includes('rdna');
+    return { gpuVendor: 'AMD', acceleratorType: isDiscrete ? 'discrete_gpu' : 'integrated_gpu' };
+  }
+  if (s.includes('intel') || s.includes('iris') || s.includes('uhd') || s.includes('hd graphics')) {
+    const isArc = s.includes('arc') || s.includes('a770') || s.includes('a750') || s.includes('a580');
+    return { gpuVendor: 'Intel', acceleratorType: isArc ? 'discrete_gpu' : 'integrated_gpu' };
+  }
+  if (s.includes('apple') || s.includes('m1') || s.includes('m2') || s.includes('m3') || s.includes('m4') || s.includes('a17') || s.includes('a16')) {
+    return { gpuVendor: 'Apple', acceleratorType: isMobile ? 'npu' : 'integrated_gpu' };
+  }
+  if (s.includes('qualcomm') || s.includes('adreno') || s.includes('snapdragon')) {
+    return { gpuVendor: 'Qualcomm', acceleratorType: 'npu' };
+  }
+  if (s.includes('arm') || s.includes('mali') || s.includes('immortalis') || s.includes('mediatek') || s.includes('dimensity') || s.includes('exynos') || s.includes('xclipse')) {
+    return { gpuVendor: 'ARM', acceleratorType: isMobile ? 'npu' : 'integrated_gpu' };
+  }
+  return { gpuVendor: 'Unknown', acceleratorType: isMobile ? 'integrated_gpu' : 'discrete_gpu' };
+}
+
 
 /**
  * Cache-friendly CPU matrix multiplication (256x256)
@@ -261,7 +333,22 @@ export async function getHardwareProfile(peerId: string): Promise<HardwareProfil
   const cpuBenchmark = runCPUMatmulBenchmark(150);
   const memBandwidth = measureMemoryBandwidth(100);
 
-  // Check WebGPU capabilities
+  // ═══════════════════════════════════════════════════════════════
+  //  STEP 1: Detect real GPU via WebGL (most reliable on Optimus)
+  //  WebGL's WEBGL_debug_renderer_info consistently exposes the
+  //  actual discrete GPU name even when WebGPU is muxed to iGPU.
+  // ═══════════════════════════════════════════════════════════════
+  const webglInfo = detectGPUViaWebGL();
+  const webglCombined = webglInfo ? `${webglInfo.vendor} ${webglInfo.renderer}` : '';
+  const webglClassification = webglInfo ? classifyGPU(webglCombined, isMobile) : null;
+
+  if (webglInfo) {
+    console.log(`[HardwareProfiler] WebGL renderer: "${webglInfo.renderer}" vendor: "${webglInfo.vendor}"`);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  STEP 2: Check WebGPU capabilities
+  // ═══════════════════════════════════════════════════════════════
   const gpuStatus = await checkWebGPUSupport();
   
   let engine: 'WEBGPU' | 'WASM_SIMD' = 'WASM_SIMD';
@@ -275,52 +362,65 @@ export async function getHardwareProfile(peerId: string): Promise<HardwareProfil
       engine = 'WEBGPU';
       maxBufferSize = gpuStatus.maxBufferSize;
 
-      // ═══ GPU Vendor & Accelerator Classification ═══
+      // ═══════════════════════════════════════════════════════════
+      //  STEP 3: Classify GPU — WebGL takes priority over WebGPU
+      //  On Optimus/switchable laptops, WebGPU adapter often reports
+      //  "intel" even when an RTX 4060 is the real discrete GPU.
+      //  WebGL sees the real hardware, so we trust it first.
+      // ═══════════════════════════════════════════════════════════
+      
+      // First, classify what WebGPU reports
+      let webgpuCombined = '';
       if (gpuStatus.adapterInfo) {
         const info = gpuStatus.adapterInfo;
-        const vendorStr = (info.vendor || '').toLowerCase();
-        const deviceStr = (info.device || '').toLowerCase();
-        const descStr = (info.description || '').toLowerCase();
-        const combined = `${vendorStr} ${deviceStr} ${descStr}`;
+        webgpuCombined = `${info.vendor || ''} ${info.device || ''} ${info.description || ''}`;
+      }
+      const webgpuClassification = classifyGPU(webgpuCombined, isMobile);
 
-        // Classify GPU vendor
-        if (combined.includes('nvidia') || combined.includes('geforce') || combined.includes('rtx') || combined.includes('gtx') || combined.includes('quadro') || combined.includes('tesla')) {
-          gpuVendor = 'NVIDIA';
+      // Now decide: if WebGL found a discrete GPU but WebGPU reports integrated, trust WebGL
+      if (webglClassification && webglClassification.gpuVendor !== 'Unknown') {
+        const webglIsDiscrete = webglClassification.acceleratorType === 'discrete_gpu';
+        const webgpuIsIntegrated = webgpuClassification.acceleratorType === 'integrated_gpu';
+
+        if (webglIsDiscrete && webgpuIsIntegrated) {
+          // OPTIMUS / SWITCHABLE GPU DETECTED
+          // WebGL sees the discrete GPU, WebGPU is stuck on integrated
+          gpuVendor = webglClassification.gpuVendor;
           acceleratorType = 'discrete_gpu';
-        } else if (combined.includes('amd') || combined.includes('radeon') || combined.includes('rx ') || combined.includes('vega') || combined.includes('navi') || combined.includes('rdna')) {
-          gpuVendor = 'AMD';
-          // AMD can be integrated (APU like Ryzen iGPU) or discrete (RX series)
-          acceleratorType = (combined.includes('rx ') || combined.includes('radeon pro') || combined.includes('navi') || combined.includes('rdna')) ? 'discrete_gpu' : 'integrated_gpu';
-        } else if (combined.includes('intel') || combined.includes('iris') || combined.includes('uhd') || combined.includes('hd graphics')) {
-          gpuVendor = 'Intel';
-          // Intel Arc is discrete, everything else (Iris, UHD, HD) is integrated
-          acceleratorType = (combined.includes('arc') || combined.includes('a770') || combined.includes('a750') || combined.includes('a580')) ? 'discrete_gpu' : 'integrated_gpu';
-        } else if (combined.includes('apple') || combined.includes('m1') || combined.includes('m2') || combined.includes('m3') || combined.includes('m4') || combined.includes('a17') || combined.includes('a16')) {
-          gpuVendor = 'Apple';
-          // Apple Silicon has unified memory architecture — GPU is always integrated but very high performance
-          // iPhones/iPads with A-series also have a capable Neural Engine (NPU)
-          acceleratorType = isMobile ? 'npu' : 'integrated_gpu';
-        } else if (combined.includes('qualcomm') || combined.includes('adreno') || combined.includes('snapdragon')) {
-          gpuVendor = 'Qualcomm';
-          // Snapdragon X Elite/Plus have NPU (Hexagon), mobile Adreno chips also have DSP/NPU
-          acceleratorType = 'npu';
-        } else if (combined.includes('arm') || combined.includes('mali') || combined.includes('immortalis') || combined.includes('mediatek') || combined.includes('dimensity') || combined.includes('exynos') || combined.includes('xclipse')) {
-          gpuVendor = 'ARM';
-          acceleratorType = isMobile ? 'npu' : 'integrated_gpu';
-        } else {
-          gpuVendor = 'Unknown';
-          acceleratorType = isMobile ? 'integrated_gpu' : 'discrete_gpu';
-        }
+          deviceModel = `${webglInfo!.renderer} (via WebGL — WebGPU on iGPU)`;
 
-        // Build a human-readable device model string
-        deviceModel = `${info.vendor || gpuVendor} ${info.description || info.device || 'GPU'}`.trim();
-        if (acceleratorType === 'npu') {
-          deviceModel += ' (NPU)';
-        } else if (acceleratorType === 'discrete_gpu') {
-          deviceModel += ' (Discrete)';
-        } else if (acceleratorType === 'integrated_gpu') {
-          deviceModel += ' (Integrated)';
+          console.warn(
+            `[HardwareProfiler] ⚠️ NVIDIA Optimus / Switchable GPU detected!\n` +
+            `  WebGL reports: ${webglInfo!.renderer} (${webglClassification.gpuVendor} discrete)\n` +
+            `  WebGPU reports: ${webgpuCombined.trim()} (${webgpuClassification.gpuVendor} integrated)\n` +
+            `  WebGPU compute shaders are running on the integrated GPU.\n` +
+            `  To force Chrome to use your ${webglClassification.gpuVendor} GPU:\n` +
+            `    → Windows: Settings → Display → Graphics → Add "chrome.exe" → High Performance\n` +
+            `    → NVIDIA: Control Panel → Manage 3D Settings → Chrome → High-performance NVIDIA\n` +
+            `    → Or launch Chrome with: --use-angle=d3d11on12`
+          );
+        } else {
+          // WebGL and WebGPU agree, or WebGL found something better
+          gpuVendor = webglClassification.gpuVendor;
+          acceleratorType = webglClassification.acceleratorType;
+          deviceModel = webglInfo ? webglInfo.renderer : (gpuStatus.adapterInfo?.description || 'GPU');
         }
+      } else if (webgpuCombined.trim()) {
+        // No useful WebGL info, use WebGPU classification
+        gpuVendor = webgpuClassification.gpuVendor;
+        acceleratorType = webgpuClassification.acceleratorType;
+        if (gpuStatus.adapterInfo) {
+          deviceModel = `${gpuStatus.adapterInfo.vendor || gpuVendor} ${gpuStatus.adapterInfo.description || gpuStatus.adapterInfo.device || 'GPU'}`.trim();
+        }
+      }
+
+      // Append accelerator type label
+      if (acceleratorType === 'npu') {
+        deviceModel += ' (NPU)';
+      } else if (acceleratorType === 'discrete_gpu') {
+        deviceModel += ' (Discrete)';
+      } else if (acceleratorType === 'integrated_gpu') {
+        deviceModel += ' (Integrated)';
       }
       
       // Run GPU-specific benchmark
@@ -333,15 +433,22 @@ export async function getHardwareProfile(peerId: string): Promise<HardwareProfil
       flops = cpuBenchmark.flops * 5; // Simulating WASM SIMD optimization multiplier
     }
   } else {
-    // If no WebGPU, WASM SIMD typically runs ~3-5x faster than standard JS
+    // No WebGPU — still use WebGL to identify the GPU if possible
+    if (webglClassification) {
+      gpuVendor = webglClassification.gpuVendor;
+      acceleratorType = webglClassification.acceleratorType;
+      if (webglInfo) deviceModel = webglInfo.renderer;
+    }
     flops = cpuBenchmark.flops * 3;
-    acceleratorType = 'cpu_only';
+    if (acceleratorType === 'cpu_only' || !webglClassification) {
+      acceleratorType = 'cpu_only';
+    }
   }
 
   // Ensure FLOPS matches some minimum baseline
   flops = Math.max(flops, 10 * 1000 * 1000); // Floor at 10 MFLOPS
 
-  console.log(`[HardwareProfiler] Detected: ${deviceModel} | Vendor: ${gpuVendor} | Type: ${acceleratorType} | Engine: ${engine} | GFLOPS: ${(flops / 1e9).toFixed(2)}`);
+  console.log(`[HardwareProfiler] Final: ${deviceModel} | Vendor: ${gpuVendor} | Type: ${acceleratorType} | Engine: ${engine} | GFLOPS: ${(flops / 1e9).toFixed(2)}`);
 
   return {
     peerId,

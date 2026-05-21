@@ -10,7 +10,8 @@ export type TaskMode =
   | 'federated_learning'
   | 'video_transcode'
   | 'vector_search'
-  | 'ray_tracing';
+  | 'ray_tracing'
+  | 'custom_job';
 
 // --- NETWORK MESSAGE DISCRIMINATING UNION ---
 export type NetworkMessageType =
@@ -63,7 +64,8 @@ export interface ComputeTask {
     | 'FEDERATED_GRADIENT'
     | 'VIDEO_TRANSCODE_CHUNK'
     | 'VECTOR_SEARCH_QUERY'
-    | 'RAYTRACE_TILE';
+    | 'RAYTRACE_TILE'
+    | 'CUSTOM_JOB_EXECUTE';
   layerRange?: [number, number];
   inputData: ArrayBuffer;
   dimensions: number[];
@@ -76,6 +78,7 @@ export interface ComputeTask {
   videoMeta?: VideoChunkMeta;
   vectorSearchMeta?: VectorSearchMeta;
   rayTraceMeta?: RayTraceTileMeta;
+  customJobMeta?: CustomJobMeta;
 }
 
 // --- TASK RESULT ---
@@ -93,6 +96,7 @@ export interface TaskResult {
   federatedMeta?: { epoch: number; loss: number };
   videoMeta?: { chunkIndex: number; totalChunks: number };
   imageGenMeta?: { step: number; totalSteps: number };
+  customJobMeta?: { output: string; error?: string; executionMs: number; chunkIndex: number };
 }
 
 // --- NETWORK NODE ---
@@ -172,4 +176,18 @@ export interface RayTraceTileMeta {
   canvasHeight: number;
   samplesPerPixel: number;
   maxBounces: number;
+}
+
+// --- CUSTOM JOB ---
+export type CustomJobLanguage = 'javascript' | 'python' | 'wasm';
+
+export interface CustomJobMeta {
+  language: CustomJobLanguage;
+  code: string;              // Source code (JS or Python)
+  wasmBinaryB64?: string;    // Base64-encoded .wasm binary (for WASM mode)
+  wasmEntryFn?: string;      // Export function name to call in the WASM module
+  inputPayload: string;      // JSON-serialized input data
+  chunkIndex: number;        // Which chunk this worker processes
+  totalChunks: number;       // Total chunks across the mesh
+  timeoutMs: number;         // Max execution time before kill
 }
