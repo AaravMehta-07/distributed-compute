@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 'use client';
 
-import React, { useEffect, useState, useRef, Suspense } from 'react';
+import React, { useEffect, useState, useRef, Suspense, useCallback } from 'react';
 import { useParams, useSearchParams, useRouter } from 'next/navigation';
 import {
   ShieldAlert,
@@ -26,12 +26,26 @@ import {
   PipelineTask
 } from '../../../lib/shardingEngine';
 import { DriftValidator, MSELog } from '../../../lib/driftValidator';
-import { NetworkNode, HardwareProfile, NetworkMessage, TensorPayload, ComputeTask } from '../../../types/network';
+import { NetworkNode, HardwareProfile, NetworkMessage, TensorPayload, ComputeTask, TaskMode, VectorSearchMatch, RayTraceTileMeta } from '../../../types/network';
 import { executeSimulatedLayer } from '../../../lib/onnxRuntime';
 
+// New Compute Engines
+import { prepareLatentGrid, executeDenoiseStep, decodeLatentToPixels, DIFFUSION_CONFIG } from '../../../lib/imageGenEngine';
+import { generateBaseWeights, computeGradients, aggregateGradients, FL_CONFIG } from '../../../lib/federatedLearningEngine';
+import { generateSimulatedFrames, splitVideoIntoChunks, processVideoChunk, VIDEO_CONFIG, VideoFilterType } from '../../../lib/videoTranscoderEngine';
+import { generateCorpus, generateEmbedding, shardVectorIndex, serializeEmbeddingShard, cosineSimilaritySearch, mergeTopK, VECTOR_CONFIG } from '../../../lib/vectorSearchEngine';
+import { generateScene, generateTiles, renderTile, RT_CONFIG } from '../../../lib/rayTracerEngine';
+
+// Components
 import { ControlPanel } from '../../../components/ControlPanel';
 import { DeviceVisualizer } from '../../../components/DeviceVisualizer';
 import { MetricsDisplay } from '../../../components/MetricsDisplay';
+import { TaskModeSelector } from '../../../components/TaskModeSelector';
+import { ImageGenPanel } from '../../../components/ImageGenPanel';
+import { FederatedLearningPanel } from '../../../components/FederatedLearningPanel';
+import { VideoTranscodePanel } from '../../../components/VideoTranscodePanel';
+import { VectorSearchPanel } from '../../../components/VectorSearchPanel';
+import { RayTracePanel } from '../../../components/RayTracePanel';
 import confetti from 'canvas-confetti';
 
 export const dynamic = 'force-dynamic';
@@ -81,6 +95,41 @@ function RoomPageContent() {
   const [copiedLink, setCopiedLink] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [clusterLogs, setClusterLogs] = useState<string[]>([]);
+
+  // ═══ TASK MODE STATE ═══
+  const [taskMode, setTaskMode] = useState<TaskMode>('llm');
+
+  // Image Generation State
+  const [imgGenPrompt, setImgGenPrompt] = useState('A futuristic city skyline at sunset');
+  const [imgGenSeed, setImgGenSeed] = useState(42);
+  const [imgGenImageData, setImgGenImageData] = useState<ImageData | null>(null);
+  const [imgGenStep, setImgGenStep] = useState(0);
+  const [imgGenTotalSteps] = useState(DIFFUSION_CONFIG.defaultSteps);
+
+  // Federated Learning State
+  const [flEpoch, setFlEpoch] = useState(0);
+  const [flTotalEpochs] = useState(FL_CONFIG.defaultEpochs);
+  const [flLossHistory, setFlLossHistory] = useState<number[]>([]);
+  const [flLearningRate, setFlLearningRate] = useState(FL_CONFIG.defaultLearningRate);
+  const [flWorkerStatus, setFlWorkerStatus] = useState<Array<{ peerId: string; status: 'waiting' | 'computing' | 'done'; loss?: number }>>([]);
+  const flWeightsRef = useRef<ArrayBuffer | null>(null);
+
+  // Video Transcode State
+  const [videoFilter, setVideoFilter] = useState<VideoFilterType>('blur');
+  const [videoChunkProgress, setVideoChunkProgress] = useState<Array<{ chunkIndex: number; peerId: string; progress: number; status: 'pending' | 'processing' | 'done' }>>([]);
+  const [videoTotalProgress, setVideoTotalProgress] = useState(0);
+
+  // Vector Search State
+  const [vecQuery, setVecQuery] = useState('');
+  const [vecResults, setVecResults] = useState<VectorSearchMatch[]>([]);
+  const [vecLatency, setVecLatency] = useState(0);
+
+  // Ray Tracing State
+  const [rtRenderedTiles, setRtRenderedTiles] = useState<Array<{ pixels: Uint8Array; meta: RayTraceTileMeta }>>([]);
+  const [rtTotalTiles, setRtTotalTiles] = useState(0);
+  const [rtCompletedTiles, setRtCompletedTiles] = useState(0);
+  const [rtSPP, setRtSPP] = useState(RT_CONFIG.defaultSPP);
+  const [rtBounces, setRtBounces] = useState(RT_CONFIG.defaultBounces);
 
   // --- REFS ---
   const rtcRef = useRef<WebRTCManager | null>(null);
@@ -753,6 +802,209 @@ function RoomPageContent() {
     dispatchConsensusTask(testTaskId, connectedNodes[1].peerId, matrixBuffer);
   };
 
+  // ═══════════════════════════════════════════════════════════
+  //  NEW COMPUTE MODE HANDLERS
+  // ═══════════════════════════════════════════════════════════
+
+  // --- IMAGE GENERATION HANDLER ---
+  const handleImageGenerate = useCallback(async () => {
+    if (isComputing) return;
+    setIsComputing(true);
+    setImgGenStep(0);
+    setImgGenImageData(null);
+    addLog(`[ImageGen] Starting distributed diffusion: "${imgGenPrompt}" seed=${imgGenSeed}`);
+
+    const { buffer, dimensions } = prepareLatentGrid(
+      DIFFUSION_CONFIG.defaultWidth,
+      DIFFUSION_CONFIG.defaultHeight,
+      imgGenSeed
+    );
+
+    let currentLatent = buffer;
+    const engine = hardwareProfile?.engine || 'WASM_SIMD';
+
+    for (let step = 0; step < imgGenTotalSteps; step++) {
+      currentLatent = await executeDenoiseStep(
+        currentLatent, dimensions, step, imgGenTotalSteps, engine
+      );
+      setImgGenStep(step + 1);
+
+      // Decode and show intermediate every 4 steps
+      if ((step + 1) % 4 === 0 || step === imgGenTotalSteps - 1) {
+        const decoded = decodeLatentToPixels(
+          currentLatent,
+          DIFFUSION_CONFIG.defaultWidth,
+          DIFFUSION_CONFIG.defaultHeight
+        );
+        setImgGenImageData(decoded);
+      }
+    }
+
+    addLog(`[ImageGen] Generation complete! ${imgGenTotalSteps} denoising steps.`);
+    setIsComputing(false);
+    confetti({ particleCount: 60, spread: 50, origin: { y: 0.7 } });
+  }, [isComputing, imgGenPrompt, imgGenSeed, imgGenTotalSteps, hardwareProfile]);
+
+  // --- FEDERATED LEARNING HANDLER ---
+  const handleFederatedTraining = useCallback(async () => {
+    if (isComputing) return;
+    setIsComputing(true);
+    setFlEpoch(0);
+    setFlLossHistory([]);
+    addLog('[FedLearn] Initializing base model weights...');
+
+    const baseWeights = generateBaseWeights();
+    flWeightsRef.current = baseWeights;
+    const engine = hardwareProfile?.engine || 'WASM_SIMD';
+
+    // Simulate workers with local gradient computation
+    const workerCount = Math.max(1, connectedNodes.length + 1);
+    const workerIds = ['host', ...connectedNodes.map(n => n.peerId)];
+
+    for (let epoch = 0; epoch < flTotalEpochs; epoch++) {
+      setFlEpoch(epoch + 1);
+      setFlWorkerStatus(workerIds.map(id => ({ peerId: id, status: 'computing' })));
+      addLog(`[FedLearn] Epoch ${epoch + 1}/${flTotalEpochs} — distributing weights to ${workerCount} nodes...`);
+
+      // Each worker computes gradients
+      const gradientBuffers: ArrayBuffer[] = [];
+      const losses: number[] = [];
+
+      for (let w = 0; w < workerCount; w++) {
+        const { gradientBuffer, loss } = await computeGradients(
+          flWeightsRef.current!, w, FL_CONFIG.defaultBatchSize, flLearningRate, engine
+        );
+        gradientBuffers.push(gradientBuffer);
+        losses.push(loss);
+        setFlWorkerStatus(prev => prev.map((s, i) =>
+          i === w ? { ...s, status: 'done' as const, loss } : s
+        ));
+      }
+
+      // Aggregate using FedAvg
+      const { updatedWeights, avgLoss } = aggregateGradients(
+        gradientBuffers, flWeightsRef.current!, flLearningRate
+      );
+      flWeightsRef.current = updatedWeights;
+      setFlLossHistory(prev => [...prev, avgLoss]);
+      addLog(`[FedLearn] Epoch ${epoch + 1} complete. Avg loss: ${avgLoss.toFixed(6)}`);
+    }
+
+    addLog('[FedLearn] Training complete!');
+    setIsComputing(false);
+    confetti({ particleCount: 60, spread: 50, origin: { y: 0.7 } });
+  }, [isComputing, hardwareProfile, connectedNodes, flTotalEpochs, flLearningRate]);
+
+  // --- VIDEO TRANSCODE HANDLER ---
+  const handleVideoTranscode = useCallback(async () => {
+    if (isComputing) return;
+    setIsComputing(true);
+    setVideoTotalProgress(0);
+    addLog(`[VideoTranscode] Starting ${videoFilter} filter across cluster...`);
+
+    const totalFrames = VIDEO_CONFIG.defaultFps * VIDEO_CONFIG.defaultDuration;
+    const workerCount = Math.max(1, connectedNodes.length + 1);
+    const chunks = splitVideoIntoChunks(totalFrames, workerCount);
+    const workerIds = ['host', ...connectedNodes.map(n => n.peerId)];
+
+    setVideoChunkProgress(chunks.map((c, i) => ({
+      chunkIndex: c.chunkIndex,
+      peerId: workerIds[i % workerIds.length],
+      progress: 0,
+      status: 'pending',
+    })));
+
+    const frameData = generateSimulatedFrames(
+      VIDEO_CONFIG.defaultWidth, VIDEO_CONFIG.defaultHeight, totalFrames
+    );
+    const engine = hardwareProfile?.engine || 'WASM_SIMD';
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = { ...chunks[i], filterType: videoFilter };
+      const framesInChunk = chunk.frameEnd - chunk.frameStart + 1;
+      const chunkSize = framesInChunk * VIDEO_CONFIG.defaultWidth * VIDEO_CONFIG.defaultHeight * 4;
+      const chunkData = frameData.slice(
+        chunk.frameStart * VIDEO_CONFIG.defaultWidth * VIDEO_CONFIG.defaultHeight * 4,
+        chunk.frameStart * VIDEO_CONFIG.defaultWidth * VIDEO_CONFIG.defaultHeight * 4 + chunkSize
+      );
+
+      setVideoChunkProgress(prev => prev.map((p, idx) =>
+        idx === i ? { ...p, status: 'processing' as const, progress: 50 } : p
+      ));
+
+      await processVideoChunk(chunkData, chunk, engine);
+
+      setVideoChunkProgress(prev => prev.map((p, idx) =>
+        idx === i ? { ...p, status: 'done' as const, progress: 100 } : p
+      ));
+      setVideoTotalProgress(((i + 1) / chunks.length) * 100);
+      addLog(`[VideoTranscode] Chunk ${i + 1}/${chunks.length} processed.`);
+    }
+
+    addLog('[VideoTranscode] All chunks processed!');
+    setIsComputing(false);
+    confetti({ particleCount: 60, spread: 50, origin: { y: 0.7 } });
+  }, [isComputing, videoFilter, hardwareProfile, connectedNodes]);
+
+  // --- VECTOR SEARCH HANDLER ---
+  const handleVectorSearch = useCallback(async () => {
+    if (isComputing || !vecQuery.trim()) return;
+    setIsComputing(true);
+    setVecResults([]);
+    const startTime = performance.now();
+    addLog(`[VecSearch] Querying: "${vecQuery}"`);
+
+    const { documents, embeddings } = generateCorpus();
+    const queryEmb = generateEmbedding(vecQuery);
+    const workerCount = Math.max(1, connectedNodes.length + 1);
+    const shards = shardVectorIndex(documents.length, workerCount);
+
+    const allResults: VectorSearchMatch[][] = [];
+    for (const shard of shards) {
+      const shardBuf = serializeEmbeddingShard(embeddings, shard.start, shard.end);
+      const results = await cosineSimilaritySearch(
+        queryEmb, shardBuf, shard.start, documents, VECTOR_CONFIG.defaultTopK, 'WASM_SIMD'
+      );
+      allResults.push(results);
+    }
+
+    const merged = mergeTopK(allResults, VECTOR_CONFIG.defaultTopK);
+    setVecResults(merged);
+    setVecLatency(performance.now() - startTime);
+    addLog(`[VecSearch] Found ${merged.length} results in ${(performance.now() - startTime).toFixed(1)}ms`);
+    setIsComputing(false);
+  }, [isComputing, vecQuery, connectedNodes]);
+
+  // --- RAY TRACING HANDLER ---
+  const handleRayTrace = useCallback(async () => {
+    if (isComputing) return;
+    setIsComputing(true);
+    setRtRenderedTiles([]);
+    setRtCompletedTiles(0);
+    addLog(`[RayTrace] Starting path tracing: ${RT_CONFIG.defaultWidth}x${RT_CONFIG.defaultHeight}, ${rtSPP} SPP, ${rtBounces} bounces`);
+
+    const scene = generateScene();
+    const tiles = generateTiles(RT_CONFIG.defaultWidth, RT_CONFIG.defaultHeight);
+    setRtTotalTiles(tiles.length);
+
+    // Update tiles with current settings
+    const configuredTiles = tiles.map(t => ({ ...t, samplesPerPixel: rtSPP, maxBounces: rtBounces }));
+
+    for (let i = 0; i < configuredTiles.length; i++) {
+      const result = await renderTile(configuredTiles[i], scene);
+      setRtRenderedTiles(prev => [...prev, result]);
+      setRtCompletedTiles(i + 1);
+
+      if ((i + 1) % 5 === 0) {
+        addLog(`[RayTrace] Rendered tile ${i + 1}/${configuredTiles.length}`);
+      }
+    }
+
+    addLog(`[RayTrace] Render complete! ${configuredTiles.length} tiles.`);
+    setIsComputing(false);
+    confetti({ particleCount: 80, spread: 60, origin: { y: 0.7 } });
+  }, [isComputing, rtSPP, rtBounces]);
+
   // --- UTILS ---
   const copyRoomLink = () => {
     const link = `${window.location.origin}/room/${roomId}?role=worker`;
@@ -814,6 +1066,15 @@ function RoomPageContent() {
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 overflow-y-auto">
         {/* Left Side: Controls & Visualizations (8 cols) */}
         <div className="lg:col-span-8 flex flex-col space-y-6">
+          {/* Task Mode Selector */}
+          {role === 'host' && (
+            <TaskModeSelector
+              currentMode={taskMode}
+              onModeChange={setTaskMode}
+              isComputing={isComputing}
+            />
+          )}
+
           {/* Module 3 Metrics / Device Visualizer */}
           <DeviceVisualizer
             isHost={role === 'host'}
@@ -837,25 +1098,96 @@ function RoomPageContent() {
             connectedPeersCount={connectedNodes.length}
           />
 
-          {/* Module 2 Control Panel */}
-          <ControlPanel
-            isHost={role === 'host'}
-            peerId={peerId}
-            hostId={hostId}
-            connectedNodes={connectedNodes}
-            onTriggerPrompt={handleTriggerPrompt}
-            isComputing={isComputing}
-            modelName={modelName}
-            onModelChange={setModelName}
-            assignedLayers={assignedLayers}
-            totalLayers={MODEL_CONFIG.totalLayers}
-            engine={hardwareProfile?.engine || 'WASM_SIMD'}
-            flops={hardwareProfile?.flops || 0}
-            safeMemoryLimit={maxMemory}
-            requireQuantization={requireQuantization}
-            manualLayerAllocation={manualLayerAllocation}
-            onManualAllocationUpdate={handleManualAllocationUpdate}
-          />
+          {/* Mode-Specific Result Panels (Host only) */}
+          {role === 'host' && taskMode === 'image_gen' && (
+            <ImageGenPanel
+              imageData={imgGenImageData}
+              currentStep={imgGenStep}
+              totalSteps={imgGenTotalSteps}
+              isGenerating={isComputing && taskMode === 'image_gen'}
+              prompt={imgGenPrompt}
+              seed={imgGenSeed}
+              width={DIFFUSION_CONFIG.defaultWidth}
+              height={DIFFUSION_CONFIG.defaultHeight}
+              onPromptChange={setImgGenPrompt}
+              onSeedChange={setImgGenSeed}
+              onGenerate={handleImageGenerate}
+            />
+          )}
+
+          {role === 'host' && taskMode === 'federated_learning' && (
+            <FederatedLearningPanel
+              currentEpoch={flEpoch}
+              totalEpochs={flTotalEpochs}
+              lossHistory={flLossHistory}
+              learningRate={flLearningRate}
+              isTraining={isComputing && taskMode === 'federated_learning'}
+              workerGradientStatus={flWorkerStatus}
+              onStartTraining={handleFederatedTraining}
+              onLearningRateChange={setFlLearningRate}
+            />
+          )}
+
+          {role === 'host' && taskMode === 'video_transcode' && (
+            <VideoTranscodePanel
+              filterType={videoFilter}
+              onFilterChange={setVideoFilter}
+              isProcessing={isComputing && taskMode === 'video_transcode'}
+              chunkProgress={videoChunkProgress}
+              totalProgress={videoTotalProgress}
+              onStartTranscode={handleVideoTranscode}
+            />
+          )}
+
+          {role === 'host' && taskMode === 'vector_search' && (
+            <VectorSearchPanel
+              query={vecQuery}
+              onQueryChange={setVecQuery}
+              isSearching={isComputing && taskMode === 'vector_search'}
+              results={vecResults}
+              searchLatencyMs={vecLatency}
+              totalDocs={VECTOR_CONFIG.corpusSize}
+              onSearch={handleVectorSearch}
+            />
+          )}
+
+          {role === 'host' && taskMode === 'ray_tracing' && (
+            <RayTracePanel
+              canvasWidth={RT_CONFIG.defaultWidth}
+              canvasHeight={RT_CONFIG.defaultHeight}
+              renderedTiles={rtRenderedTiles}
+              totalTiles={rtTotalTiles}
+              completedTiles={rtCompletedTiles}
+              isRendering={isComputing && taskMode === 'ray_tracing'}
+              samplesPerPixel={rtSPP}
+              maxBounces={rtBounces}
+              onSPPChange={setRtSPP}
+              onBouncesChange={setRtBounces}
+              onStartRender={handleRayTrace}
+            />
+          )}
+
+          {/* Module 2 Control Panel (LLM mode) */}
+          {(taskMode === 'llm' || role === 'worker') && (
+            <ControlPanel
+              isHost={role === 'host'}
+              peerId={peerId}
+              hostId={hostId}
+              connectedNodes={connectedNodes}
+              onTriggerPrompt={handleTriggerPrompt}
+              isComputing={isComputing}
+              modelName={modelName}
+              onModelChange={setModelName}
+              assignedLayers={assignedLayers}
+              totalLayers={MODEL_CONFIG.totalLayers}
+              engine={hardwareProfile?.engine || 'WASM_SIMD'}
+              flops={hardwareProfile?.flops || 0}
+              safeMemoryLimit={maxMemory}
+              requireQuantization={requireQuantization}
+              manualLayerAllocation={manualLayerAllocation}
+              onManualAllocationUpdate={handleManualAllocationUpdate}
+            />
+          )}
         </div>
 
         {/* Right Side: Execution Consoles / Chat (4 cols) */}

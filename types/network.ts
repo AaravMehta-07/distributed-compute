@@ -1,3 +1,18 @@
+// ═══════════════════════════════════════════════════════════════
+//  NEXUSCOMPUTE — GLOBAL TYPE DEFINITIONS
+//  All network messages passed over WebRTC Data Channels
+// ═══════════════════════════════════════════════════════════════
+
+// --- TASK MODE ENUM ---
+export type TaskMode =
+  | 'llm'
+  | 'image_gen'
+  | 'federated_learning'
+  | 'video_transcode'
+  | 'vector_search'
+  | 'ray_tracing';
+
+// --- NETWORK MESSAGE DISCRIMINATING UNION ---
 export type NetworkMessageType =
   | 'HEARTBEAT'
   | 'TENSOR_PAYLOAD'
@@ -14,44 +29,71 @@ export type NetworkMessage =
   | { type: 'TASK_RESULT'; result: TaskResult }
   | { type: 'PROFILE_REPORT'; profile: HardwareProfile };
 
+// --- TENSOR PAYLOAD ---
 export interface TensorPayload {
   taskId: string;
   layerRange: [number, number];
   dimensions: number[];
   dataType: 'float32' | 'float16' | 'int4';
-  tensorBuffer: ArrayBuffer; // Binary serialized data
+  tensorBuffer: ArrayBuffer;
 }
 
+// --- HARDWARE PROFILE ---
 export interface HardwareProfile {
   peerId: string;
   engine: 'WEBGPU' | 'WASM_SIMD';
-  maxBufferSize: number; // in bytes
-  flops: number; // Raw measured FLOPS
-  memoryBandwidthMBs: number; // Raw measured memory bandwidth (MB/s)
+  maxBufferSize: number;
+  flops: number;
+  memoryBandwidthMBs: number;
   timestamp: number;
   deviceModel: string;
   isMobile: boolean;
 }
 
+// --- COMPUTE TASK (Extended with all modes) ---
 export interface ComputeTask {
   taskId: string;
-  type: 'MATRIX_MULTIPLY' | 'TRANSFORMER_FORWARD' | 'MAP_REDUCE';
+  type:
+    | 'MATRIX_MULTIPLY'
+    | 'TRANSFORMER_FORWARD'
+    | 'MAP_REDUCE'
+    | 'IMAGE_DENOISE_STEP'
+    | 'FEDERATED_GRADIENT'
+    | 'VIDEO_TRANSCODE_CHUNK'
+    | 'VECTOR_SEARCH_QUERY'
+    | 'RAYTRACE_TILE';
   layerRange?: [number, number];
-  inputData: ArrayBuffer; // Binary serialized input data
+  inputData: ArrayBuffer;
   dimensions: number[];
-  redundantPeerId?: string; // If this task is sent to multiple nodes for MSE verification
+  redundantPeerId?: string;
   timestamp: number;
+
+  // Mode-specific metadata (only populated for relevant task types)
+  imageGenMeta?: ImageGenTaskMeta;
+  federatedMeta?: FederatedTaskMeta;
+  videoMeta?: VideoChunkMeta;
+  vectorSearchMeta?: VectorSearchMeta;
+  rayTraceMeta?: RayTraceTileMeta;
 }
 
+// --- TASK RESULT ---
 export interface TaskResult {
   taskId: string;
   peerId: string;
-  outputData: ArrayBuffer; // Binary serialized output data
+  outputData: ArrayBuffer;
   dimensions: number[];
   executionTimeMs: number;
   timestamp: number;
+  // Mode-specific result metadata
+  resultType?: ComputeTask['type'];
+  rayTraceMeta?: { tileX: number; tileY: number; tileW: number; tileH: number };
+  vectorSearchMeta?: { matches: VectorSearchMatch[] };
+  federatedMeta?: { epoch: number; loss: number };
+  videoMeta?: { chunkIndex: number; totalChunks: number };
+  imageGenMeta?: { step: number; totalSteps: number };
 }
 
+// --- NETWORK NODE ---
 export interface NetworkNode {
   peerId: string;
   profile: HardwareProfile;
@@ -60,9 +102,72 @@ export interface NetworkNode {
   assignedLayers?: [number, number];
 }
 
+// --- MODEL CONFIG ---
 export interface ModelConfig {
   name: string;
   totalLayers: number;
   hiddenSize: number;
   vocabSize: number;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  MODE-SPECIFIC METADATA INTERFACES
+// ═══════════════════════════════════════════════════════════════
+
+// --- IMAGE GENERATION (Stable Diffusion) ---
+export interface ImageGenTaskMeta {
+  prompt: string;
+  seed: number;
+  width: number;
+  height: number;
+  currentStep: number;
+  totalSteps: number;
+  guidanceScale: number;
+}
+
+// --- FEDERATED LEARNING ---
+export interface FederatedTaskMeta {
+  epoch: number;
+  totalEpochs: number;
+  learningRate: number;
+  batchSize: number;
+  datasetShardIndex: number;
+}
+
+// --- VIDEO TRANSCODE ---
+export interface VideoChunkMeta {
+  chunkIndex: number;
+  totalChunks: number;
+  frameStart: number;
+  frameEnd: number;
+  filterType: 'blur' | 'sharpen' | 'color_grade' | 'grayscale' | 'edge_detect';
+  resolution: { width: number; height: number };
+}
+
+// --- VECTOR SEARCH ---
+export interface VectorSearchMeta {
+  queryText: string;
+  topK: number;
+  shardIndex: number;
+  totalShards: number;
+  embeddingDim: number;
+}
+
+export interface VectorSearchMatch {
+  documentId: string;
+  documentText: string;
+  similarity: number;
+  shardOrigin: string;
+}
+
+// --- RAY TRACING ---
+export interface RayTraceTileMeta {
+  tileX: number;
+  tileY: number;
+  tileW: number;
+  tileH: number;
+  canvasWidth: number;
+  canvasHeight: number;
+  samplesPerPixel: number;
+  maxBounces: number;
 }
