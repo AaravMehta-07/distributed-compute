@@ -15,7 +15,7 @@ export async function checkWebGPUSupport(): Promise<{
   }
 
   try {
-    const adapter = await navigator.gpu.requestAdapter();
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) {
       return { supported: false, maxBufferSize: 0, maxStorageBufferBindingSize: 0 };
     }
@@ -132,7 +132,7 @@ async function runWebGPUBenchmark(
     throw new Error('WebGPU not supported');
   }
 
-  const adapter = await navigator.gpu.requestAdapter();
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) throw new Error('No adapter');
   const device = await adapter.requestDevice();
 
@@ -237,7 +237,9 @@ export async function getHardwareProfile(peerId: string): Promise<HardwareProfil
       memoryBandwidthMBs: 0,
       timestamp: Date.now(),
       deviceModel: 'Next.js Server Node',
-      isMobile: false
+      isMobile: false,
+      gpuVendor: 'Unknown',
+      acceleratorType: 'cpu_only'
     };
   }
 
@@ -265,13 +267,60 @@ export async function getHardwareProfile(peerId: string): Promise<HardwareProfil
   let engine: 'WEBGPU' | 'WASM_SIMD' = 'WASM_SIMD';
   let maxBufferSize = 512 * 1024 * 1024; // Default fallback 512MB
   let flops = cpuBenchmark.flops;
+  let gpuVendor: HardwareProfile['gpuVendor'] = 'Unknown';
+  let acceleratorType: HardwareProfile['acceleratorType'] = 'cpu_only';
 
   if (gpuStatus.supported) {
     try {
       engine = 'WEBGPU';
       maxBufferSize = gpuStatus.maxBufferSize;
+
+      // ═══ GPU Vendor & Accelerator Classification ═══
       if (gpuStatus.adapterInfo) {
-        deviceModel = `${gpuStatus.adapterInfo.vendor} ${gpuStatus.adapterInfo.description || gpuStatus.adapterInfo.device}`;
+        const info = gpuStatus.adapterInfo;
+        const vendorStr = (info.vendor || '').toLowerCase();
+        const deviceStr = (info.device || '').toLowerCase();
+        const descStr = (info.description || '').toLowerCase();
+        const combined = `${vendorStr} ${deviceStr} ${descStr}`;
+
+        // Classify GPU vendor
+        if (combined.includes('nvidia') || combined.includes('geforce') || combined.includes('rtx') || combined.includes('gtx') || combined.includes('quadro') || combined.includes('tesla')) {
+          gpuVendor = 'NVIDIA';
+          acceleratorType = 'discrete_gpu';
+        } else if (combined.includes('amd') || combined.includes('radeon') || combined.includes('rx ') || combined.includes('vega') || combined.includes('navi') || combined.includes('rdna')) {
+          gpuVendor = 'AMD';
+          // AMD can be integrated (APU like Ryzen iGPU) or discrete (RX series)
+          acceleratorType = (combined.includes('rx ') || combined.includes('radeon pro') || combined.includes('navi') || combined.includes('rdna')) ? 'discrete_gpu' : 'integrated_gpu';
+        } else if (combined.includes('intel') || combined.includes('iris') || combined.includes('uhd') || combined.includes('hd graphics')) {
+          gpuVendor = 'Intel';
+          // Intel Arc is discrete, everything else (Iris, UHD, HD) is integrated
+          acceleratorType = (combined.includes('arc') || combined.includes('a770') || combined.includes('a750') || combined.includes('a580')) ? 'discrete_gpu' : 'integrated_gpu';
+        } else if (combined.includes('apple') || combined.includes('m1') || combined.includes('m2') || combined.includes('m3') || combined.includes('m4') || combined.includes('a17') || combined.includes('a16')) {
+          gpuVendor = 'Apple';
+          // Apple Silicon has unified memory architecture — GPU is always integrated but very high performance
+          // iPhones/iPads with A-series also have a capable Neural Engine (NPU)
+          acceleratorType = isMobile ? 'npu' : 'integrated_gpu';
+        } else if (combined.includes('qualcomm') || combined.includes('adreno') || combined.includes('snapdragon')) {
+          gpuVendor = 'Qualcomm';
+          // Snapdragon X Elite/Plus have NPU (Hexagon), mobile Adreno chips also have DSP/NPU
+          acceleratorType = 'npu';
+        } else if (combined.includes('arm') || combined.includes('mali') || combined.includes('immortalis') || combined.includes('mediatek') || combined.includes('dimensity') || combined.includes('exynos') || combined.includes('xclipse')) {
+          gpuVendor = 'ARM';
+          acceleratorType = isMobile ? 'npu' : 'integrated_gpu';
+        } else {
+          gpuVendor = 'Unknown';
+          acceleratorType = isMobile ? 'integrated_gpu' : 'discrete_gpu';
+        }
+
+        // Build a human-readable device model string
+        deviceModel = `${info.vendor || gpuVendor} ${info.description || info.device || 'GPU'}`.trim();
+        if (acceleratorType === 'npu') {
+          deviceModel += ' (NPU)';
+        } else if (acceleratorType === 'discrete_gpu') {
+          deviceModel += ' (Discrete)';
+        } else if (acceleratorType === 'integrated_gpu') {
+          deviceModel += ' (Integrated)';
+        }
       }
       
       // Run GPU-specific benchmark
@@ -280,15 +329,19 @@ export async function getHardwareProfile(peerId: string): Promise<HardwareProfil
     } catch (e) {
       console.warn('WebGPU benchmark failed, using CPU/WASM fallback:', e);
       engine = 'WASM_SIMD';
+      acceleratorType = 'cpu_only';
       flops = cpuBenchmark.flops * 5; // Simulating WASM SIMD optimization multiplier
     }
   } else {
     // If no WebGPU, WASM SIMD typically runs ~3-5x faster than standard JS
     flops = cpuBenchmark.flops * 3;
+    acceleratorType = 'cpu_only';
   }
 
   // Ensure FLOPS matches some minimum baseline
   flops = Math.max(flops, 10 * 1000 * 1000); // Floor at 10 MFLOPS
+
+  console.log(`[HardwareProfiler] Detected: ${deviceModel} | Vendor: ${gpuVendor} | Type: ${acceleratorType} | Engine: ${engine} | GFLOPS: ${(flops / 1e9).toFixed(2)}`);
 
   return {
     peerId,
@@ -298,7 +351,9 @@ export async function getHardwareProfile(peerId: string): Promise<HardwareProfil
     memoryBandwidthMBs: memBandwidth,
     timestamp: Date.now(),
     deviceModel,
-    isMobile
+    isMobile,
+    gpuVendor,
+    acceleratorType
   };
 }
 

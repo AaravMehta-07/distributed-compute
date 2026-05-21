@@ -48,6 +48,8 @@ export interface HardwareProfile {
   timestamp: number;
   deviceModel: string;
   isMobile: boolean;
+  gpuVendor?: 'NVIDIA' | 'AMD' | 'Intel' | 'Apple' | 'Qualcomm' | 'ARM' | 'Unknown';
+  acceleratorType?: 'discrete_gpu' | 'integrated_gpu' | 'npu' | 'cpu_only';
 }
 
 // --- COMPUTE TASK (Extended with all modes) ---

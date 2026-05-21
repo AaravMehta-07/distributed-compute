@@ -233,7 +233,7 @@ export async function executeSimulatedLayer(
 
   if (engine === 'WEBGPU' && typeof window !== 'undefined' && navigator.gpu) {
     try {
-      const adapter = await navigator.gpu.requestAdapter();
+      const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
       if (adapter) {
         const device = await adapter.requestDevice();
         
