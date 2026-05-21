@@ -198,6 +198,7 @@ function RoomPageContent() {
       if (pollerTimer) clearInterval(pollerTimer);
       rtc.disconnectAll();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, role]);
 
   // --- AUTOMATIC SHARDING SYSTEM ---

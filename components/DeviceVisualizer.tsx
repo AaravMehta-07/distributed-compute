@@ -40,7 +40,6 @@ export const DeviceVisualizer: React.FC<DeviceVisualizerProps> = ({
   }> = [];
 
   // Constants for SVG calculations
-  const NODE_RADIUS = 30;
   pipelineNodes.push({
     id: isHost ? peerId : hostId,
     label: isHost ? 'Host Node (You)' : 'Host Orchestrator',

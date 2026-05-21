@@ -4,29 +4,26 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Sparkles, Cpu, Users, ShieldAlert, ArrowRight, Zap,
-  RefreshCw, Globe, Network, Layers, Shield, Activity, ChevronRight
+  RefreshCw, Network, Shield, ChevronRight
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 /* ═══════════════════════════════════════════════
    FLOATING PARTICLES COMPONENT
    ═══════════════════════════════════════════════ */
-function FloatingParticles() {
-  // Pre-computed positions so they don't shift on re-render
-  const particles = useRef(
-    Array.from({ length: 40 }, (_, i) => ({
-      id: i,
-      left: `${(i * 2.5 + 7) % 100}%`,
-      top: `${(i * 3.7 + 13) % 100}%`,
-      size: 1 + (i % 3),
-      delay: (i * 0.4) % 8,
-      duration: 4 + (i % 5) * 2,
-    }))
-  ).current;
+const STATIC_PARTICLES = Array.from({ length: 40 }, (_, i) => ({
+  id: i,
+  left: `${(i * 2.5 + 7) % 100}%`,
+  top: `${(i * 3.7 + 13) % 100}%`,
+  size: 1 + (i % 3),
+  delay: (i * 0.4) % 8,
+  duration: 4 + (i % 5) * 2,
+}));
 
+function FloatingParticles() {
   return (
     <div className="absolute inset-0 overflow-hidden pointer-events-none -z-10">
-      {particles.map((p) => (
+      {STATIC_PARTICLES.map((p) => (
         <div
           key={p.id}
           className="absolute rounded-full bg-indigo-400/30"

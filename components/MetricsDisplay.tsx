@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { Activity, Shield, HardDrive, Clock, Terminal } from 'lucide-react';
-import { motion } from 'framer-motion';
+import { motion, Variants } from 'framer-motion';
 import { MSELog } from '../lib/driftValidator';
 
 interface MetricsDisplayProps {
@@ -34,7 +34,7 @@ export const MetricsDisplay: React.FC<MetricsDisplayProps> = ({
 
   const memPercent = Math.min(100, (memoryAllocatedBytes / Math.max(1, maxMemoryBytes)) * 100);
 
-  const container: any = {
+  const container: Variants = {
     hidden: { opacity: 0 },
     show: {
       opacity: 1,
@@ -42,7 +42,7 @@ export const MetricsDisplay: React.FC<MetricsDisplayProps> = ({
     }
   };
 
-  const item: any = {
+  const item: Variants = {
     hidden: { opacity: 0, y: 20 },
     show: { opacity: 1, y: 0, transition: { type: "spring", stiffness: 300, damping: 24 } }
   };
