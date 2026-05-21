@@ -391,6 +391,13 @@ export const CustomJobPanel: React.FC<CustomJobPanelProps> = ({
     onMainEntrypointChange(detectedEntrypoint);
     setActiveFile(detectedEntrypoint);
     onIsFolderModeChange(true);
+
+    // Auto-detect and switch language based on entrypoint extension
+    if (detectedEntrypoint.endsWith('.py')) {
+      onLanguageChange('python');
+    } else if (detectedEntrypoint.endsWith('.js') || detectedEntrypoint.endsWith('.ts')) {
+      onLanguageChange('javascript');
+    }
   };
 
   // Add environment variable helper
