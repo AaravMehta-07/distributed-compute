@@ -1,8 +1,13 @@
 @import "tailwindcss";
 
 :root {
-  --background: #020617; /* Deepest Slate 950 for premium console space */
-  --foreground: #f8fafc; /* Slate 50 ultra white text */
+  --background: #030014;
+  --foreground: #f8fafc;
+  --accent-1: #6366f1;
+  --accent-2: #8b5cf6;
+  --accent-3: #a78bfa;
+  --glow-indigo: rgba(99, 102, 241, 0.15);
+  --glow-violet: rgba(139, 92, 246, 0.12);
 }
 
 body {
@@ -13,27 +18,156 @@ body {
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
 }
 
-/* Custom Premium Thin Scrollbar */
+/* ═══════════════════════════════════════════════
+   PREMIUM THIN SCROLLBAR
+   ═══════════════════════════════════════════════ */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
-
 ::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.6);
-  border-radius: 9999px;
+  background: rgba(15, 23, 42, 0.4);
 }
-
 ::-webkit-scrollbar-thumb {
-  background: rgba(99, 102, 241, 0.2);
+  background: linear-gradient(180deg, var(--accent-1), var(--accent-2));
   border-radius: 9999px;
 }
-
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(99, 102, 241, 0.4);
+  background: linear-gradient(180deg, var(--accent-2), var(--accent-3));
 }
 
-/* Base interactive transitions */
+/* ═══════════════════════════════════════════════
+   GLOBAL INTERACTIVE TRANSITIONS
+   ═══════════════════════════════════════════════ */
 a, button, select, input, textarea {
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ═══════════════════════════════════════════════
+   ANIMATED GRADIENT MESH BACKGROUND
+   ═══════════════════════════════════════════════ */
+@keyframes meshFloat1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  25% { transform: translate(80px, -60px) scale(1.1); }
+  50% { transform: translate(-40px, 80px) scale(0.95); }
+  75% { transform: translate(60px, 40px) scale(1.05); }
+}
+@keyframes meshFloat2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  25% { transform: translate(-100px, 50px) scale(1.15); }
+  50% { transform: translate(60px, -80px) scale(0.9); }
+  75% { transform: translate(-30px, -40px) scale(1.08); }
+}
+@keyframes meshFloat3 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(50px, 70px) scale(1.12); }
+  66% { transform: translate(-70px, -30px) scale(0.92); }
+}
+
+.mesh-orb-1 {
+  animation: meshFloat1 18s ease-in-out infinite;
+}
+.mesh-orb-2 {
+  animation: meshFloat2 22s ease-in-out infinite;
+}
+.mesh-orb-3 {
+  animation: meshFloat3 15s ease-in-out infinite;
+}
+
+/* ═══════════════════════════════════════════════
+   ANIMATED BORDER GRADIENT (ROTATING)
+   ═══════════════════════════════════════════════ */
+@property --angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes borderSpin {
+  to { --angle: 360deg; }
+}
+
+.animated-border {
+  --angle: 0deg;
+  border: 1.5px solid transparent;
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+  background-image:
+    linear-gradient(var(--background), var(--background)),
+    conic-gradient(from var(--angle), transparent 40%, var(--accent-1) 50%, var(--accent-2) 55%, var(--accent-3) 60%, transparent 70%);
+  animation: borderSpin 4s linear infinite;
+}
+
+/* ═══════════════════════════════════════════════
+   GLOW PULSE EFFECTS
+   ═══════════════════════════════════════════════ */
+@keyframes glowPulse {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 0.7; transform: scale(1.02); }
+}
+.glow-pulse {
+  animation: glowPulse 3s ease-in-out infinite;
+}
+
+/* ═══════════════════════════════════════════════
+   GRID DOTS PATTERN
+   ═══════════════════════════════════════════════ */
+@keyframes gridFade {
+  0%, 100% { opacity: 0.08; }
+  50% { opacity: 0.15; }
+}
+.grid-dots {
+  background-image: radial-gradient(circle, rgba(99, 102, 241, 0.25) 1px, transparent 1px);
+  background-size: 32px 32px;
+  animation: gridFade 6s ease-in-out infinite;
+}
+
+/* ═══════════════════════════════════════════════
+   SPOTLIGHT / MOUSE FOLLOW EFFECT
+   ═══════════════════════════════════════════════ */
+.spotlight {
+  background: radial-gradient(600px circle at var(--mouse-x, 50%) var(--mouse-y, 50%), rgba(99, 102, 241, 0.06), transparent 50%);
+}
+
+/* ═══════════════════════════════════════════════
+   TEXT SHIMMER ANIMATION
+   ═══════════════════════════════════════════════ */
+@keyframes textShimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+.text-shimmer {
+  background-size: 200% auto;
+  animation: textShimmer 4s linear infinite;
+}
+
+/* ═══════════════════════════════════════════════
+   FLOATING PARTICLE KEYFRAMES
+   ═══════════════════════════════════════════════ */
+@keyframes float {
+  0%, 100% { transform: translateY(0px) rotate(0deg); opacity: 0.6; }
+  25% { transform: translateY(-15px) rotate(2deg); opacity: 0.9; }
+  50% { transform: translateY(-25px) rotate(-1deg); opacity: 0.5; }
+  75% { transform: translateY(-10px) rotate(1deg); opacity: 0.8; }
+}
+
+/* ═══════════════════════════════════════════════
+   STROKE FLOW FOR SVG PATHS
+   ═══════════════════════════════════════════════ */
+@keyframes strokeFlow {
+  to { stroke-dashoffset: -100; }
+}
+.animate-flow {
+  animation: strokeFlow 3s linear infinite;
+}
+
+/* ═══════════════════════════════════════════════
+   COUNTER NUMBER ROLL-UP
+   ═══════════════════════════════════════════════ */
+@keyframes countUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.count-up {
+  animation: countUp 0.6s ease-out forwards;
 }
